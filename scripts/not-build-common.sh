@@ -67,7 +67,7 @@ build_kernel() {
     local device=$1 variant=$2 image=$3 valid=false model fragment
     local jobs=${JOBS:-$(nproc)} source_sha dirty=false
     local out="$PWD/out" boot dts dtb ak3 zipname toolchain_version ak3_sha
-    local -a configs make_args dtbs
+    local -a configs make_args dtbs submodules
     for model in "${VALID_MODELS[@]}"; do
         [[ "$device" != "$model" ]] || valid=true
     done
@@ -79,7 +79,7 @@ build_kernel() {
     configs=(vendor/kona-perf_defconfig vendor/samsung/kona-sec-common.config
         "vendor/samsung/$device.config")
     case "$variant" in
-        stock) ;;
+        stock) configs+=(vendor/not/no-ksu.config) ;;
         ksu) configs+=(vendor/not/ksu.config) ;;
         ksu+permissive) configs+=(vendor/not/ksu.config vendor/not/permissive.config) ;;
         *) die "Unsupported variant: $variant" ;;
@@ -100,7 +100,17 @@ build_kernel() {
     TC_DIR=$(realpath -m -- "${TC_DIR:-$PWD/tc/clang}")
     prepare_toolchain
 
-    git submodule update --init --recursive
+    submodules=(Baseband-guard NoMount)
+    if [[ "$variant" != stock ]]; then
+        submodules+=(KernelSU)
+    fi
+    # Public dependencies must not prompt for credentials when unavailable.
+    GIT_TERMINAL_PROMPT=0 git submodule update --init --recursive -- "${submodules[@]}" ||
+        die "Could not fetch dependencies for $variant. KernelSU variants require the pinned KernelSU repository; stock does not."
+    if [[ "$variant" != stock ]]; then
+        [[ -s drivers/kernelsu/Kconfig && -s drivers/kernelsu/Makefile ]] ||
+            die 'KernelSU source is missing; refusing to produce a rooted variant without it.'
+    fi
     source_sha=$(git rev-parse --verify HEAD)
     [[ -z "$(git status --porcelain --untracked-files=no)" ]] || dirty=true
     export PROJECT_NAME="$device"
@@ -164,7 +174,7 @@ build_kernel() {
             printf 'clang_source=preinstalled (archive provenance unavailable)\n'
         fi
         printf '\nSubmodules:\n'
-        git submodule status --recursive
+        git submodule status --recursive -- "${submodules[@]}"
         printf '\nBuild artifact hashes:\n'
         (cd "$boot" && sha256sum "$image" dtb dtbo.img)
     } > "$BUILD_TMP/$zipname.build-info.txt"

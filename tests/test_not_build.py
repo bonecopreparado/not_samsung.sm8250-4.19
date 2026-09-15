@@ -54,6 +54,10 @@ FAKE_GIT = r'''#!/usr/bin/env python3
 import os, pathlib, sys
 args = sys.argv[1:]
 if args[0] == "submodule":
+    with open(os.environ["GIT_LOG"], "a") as log:
+        log.write(repr(args) + "\n")
+    if "update" in args and "KernelSU" in args and os.environ.get("KSU_UNAVAILABLE"):
+        sys.exit(48)
     if "update" in args and os.environ.get("FAIL_SUBMODULE"):
         sys.exit(43)
     if "status" in args:
@@ -120,7 +124,14 @@ class BuildScriptsTest(unittest.TestCase):
                      "CLANG_SHA256", "AK3_COMMIT", "PLATFORM_VERSION"):
             self.env.pop(name, None)
         self.env.update(PATH=str(self.bin) + os.pathsep + self.env["PATH"],
-                        JOBS="2", MAKE_LOG=str(self.root / "make.jsonl"))
+                        JOBS="2", MAKE_LOG=str(self.root / "make.jsonl"),
+                        GIT_LOG=str(self.root / "git.log"))
+        for name in ("Kconfig", "Makefile"):
+            path = self.root / "drivers/kernelsu" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# KernelSU fixture\n")
+        (self.root / "arch/arm64/configs/vendor/not/no-ksu.config").write_text(
+            "# CONFIG_KSU is not set\n")
         self.old_zip = self.root / "not-previous.zip"
         self.old_zip.write_bytes(b"KEEP OLD BUILD")
         (self.root / "AnyKernel3").mkdir()
@@ -224,6 +235,24 @@ class BuildScriptsTest(unittest.TestCase):
                 result = self.run_build(extra={"FAIL_TARGET": target})
                 self.assertEqual(result.returncode, 42, result.stdout)
                 self.assert_failure(result)
+
+    def test_stock_without_kernelsu_repository(self):
+        shutil.rmtree(self.root / "drivers/kernelsu")
+        archive = self.check_success(self.run_build(extra={"KSU_UNAVAILABLE": "1"}),
+                                     "Image.gz", "stock")
+        self.assertIn("# CONFIG_KSU is not set", Path(str(archive) + ".config").read_text())
+        self.assertNotIn("KernelSU", (self.root / "git.log").read_text())
+
+    def test_rooted_variants_require_kernelsu_repository(self):
+        for variant in ("ksu", "ksu+permissive"):
+            with self.subTest(variant=variant):
+                self.assert_failure(self.run_build(variant, extra={"KSU_UNAVAILABLE": "1"}),
+                                    "Could not fetch dependencies")
+        self.assertFalse((self.root / "make.jsonl").exists())
+
+    def test_rooted_variant_rejects_missing_source(self):
+        shutil.rmtree(self.root / "drivers/kernelsu")
+        self.assert_failure(self.run_build("ksu"), "KernelSU source is missing")
 
     def test_missing_or_empty_boot_outputs(self):
         for name in ("DTB_MODE", "DTBO_MODE", "IMAGE_MODE"):

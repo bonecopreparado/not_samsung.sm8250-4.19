@@ -16,13 +16,17 @@ sudo apt install build-essential bc bison flex libssl-dev libelf-dev \
 
 Use Bash on Linux. GNU coreutils/findutils and util-linux (including `flock`)
 are also required and are normally installed on Ubuntu. The scripts update
-the pinned Git submodules automatically.
+the pinned Git submodules needed by the selected variant automatically.
+`stock` downloads Baseband-guard and NoMount and explicitly disables KernelSU.
+It also works when the KernelSU repository is unavailable. The `ksu` variants
+still require the pinned KernelSU source; they fail rather than silently
+producing a build without root. Dependency downloads never ask for credentials.
 
 ```sh
 # Interactive device/variant selection:
 ./build-local.sh
 
-# S20 FE (r8q), without the optional KernelSU/permissive fragments:
+# S20 FE (r8q), with KernelSU explicitly disabled:
 JOBS=12 ./build-local.sh r8q stock
 
 # KernelSU, using the same local build entry point:
@@ -36,7 +40,7 @@ DEVICE=r8q JOBS=12 ./build.sh
 its uncompressed `Image` output and accepts `BUILD_VARIANT=stock`, `ksu`
 or `ksu+permissive`. The last variant explicitly enables the existing
 SELinux permissive configuration; use `stock` or `ksu` for ordinary testing.
-`stock` means no additional KernelSU/permissive fragment, not a Samsung
+`stock` means KernelSU is disabled and no permissive fragment is added, not a Samsung
 stock kernel. `JOBS` defaults to the CPUs available to the current process.
 Both scripts can be called from another working directory.
 
