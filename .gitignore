@@ -147,3 +147,6 @@ noKernel/
 out/
 tc/
 *.zip
+/not-*.zip.config
+/not-*.zip.build-info.txt
+/not-*.zip.sha256
