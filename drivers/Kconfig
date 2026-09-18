@@ -264,5 +264,7 @@ source "drivers/gator/Kconfig"
 source "drivers/security/samsung/tzic/Kconfig"
 
 source "drivers/spu_verify/Kconfig"
-source "drivers/kernelsu/Kconfig"
+# Permit builds without the optional KernelSU submodule. The fallback cannot
+# enable CONFIG_KSU; build scripts require the real source for rooted variants.
+source "$(shell,if test -f '$(srctree)/drivers/kernelsu/Kconfig'; then echo drivers/kernelsu/Kconfig; else echo drivers/kernelsu-disabled.Kconfig; fi)"
 endmenu
