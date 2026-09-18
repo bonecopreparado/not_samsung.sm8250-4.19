@@ -64,7 +64,7 @@ prepare_toolchain() {
 }
 
 build_kernel() {
-    local device=$1 variant=$2 image=$3 valid=false model fragment
+    local device=$1 variant=$2 image=$3 valid=false model fragment source_file option
     local jobs=${JOBS:-$(nproc)} source_sha dirty=false
     local out="$PWD/out" boot dts dtb ak3 zipname toolchain_version ak3_sha
     local -a configs make_args dtbs submodules
@@ -98,19 +98,25 @@ build_kernel() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
     TC_DIR=$(realpath -m -- "${TC_DIR:-$PWD/tc/clang}")
-    prepare_toolchain
-
     submodules=(Baseband-guard NoMount)
     if [[ "$variant" != stock ]]; then
         submodules+=(KernelSU)
     fi
+    # Existing clones cache submodule URLs in .git/config. Migrate those too.
+    git submodule sync --recursive -- "${submodules[@]}" ||
+        die 'Could not synchronize dependency URLs.'
     # Public dependencies must not prompt for credentials when unavailable.
     GIT_TERMINAL_PROMPT=0 git submodule update --init --recursive -- "${submodules[@]}" ||
         die "Could not fetch dependencies for $variant. KernelSU variants require the pinned KernelSU repository; stock does not."
+    for source_file in security/baseband-guard/{Kconfig,Makefile} fs/nomount/{Kconfig,Makefile}; do
+        [[ -s "$source_file" ]] ||
+            die "Missing dependency file: $source_file. Check the submodule checkout and tracked symlinks before rebuilding."
+    done
     if [[ "$variant" != stock ]]; then
         [[ -s drivers/kernelsu/Kconfig && -s drivers/kernelsu/Makefile ]] ||
             die 'KernelSU source is missing; refusing to produce a rooted variant without it.'
     fi
+    prepare_toolchain
     source_sha=$(git rev-parse --verify HEAD)
     [[ -z "$(git status --porcelain --untracked-files=no)" ]] || dirty=true
     export PROJECT_NAME="$device"
@@ -123,6 +129,17 @@ build_kernel() {
     printf 'Building %s (%s) with %s jobs\n' "$device" "$variant" "$jobs"
     make "${make_args[@]}" "${configs[@]}"
     make "${make_args[@]}" olddefconfig
+
+    # Kconfig may silently drop requested symbols when dependencies are unmet.
+    if [[ "$variant" == stock ]]; then
+        grep -Fxq '# CONFIG_KSU is not set' "$out/.config" ||
+            die 'The final stock configuration did not disable KernelSU.'
+    else
+        for option in KSU KSU_HACK_ARM64_BRANCH_LINK KSU_LSM_SECURITY_HOOKS; do
+            grep -Fxq "CONFIG_$option=y" "$out/.config" ||
+                die "The final $variant configuration is missing CONFIG_$option=y."
+        done
+    fi
 
     boot="$out/arch/arm64/boot"
     dts="$boot/dts/vendor/qcom"

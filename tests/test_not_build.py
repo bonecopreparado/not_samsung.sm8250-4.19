@@ -31,6 +31,8 @@ configs = [a for a in args if a.startswith("vendor/")]
 if configs:
     (out / ".config").write_text("".join(
         (pathlib.Path("arch/arm64/configs") / c).read_text() for c in configs))
+if "olddefconfig" in args and os.environ.get("FINAL_KSU_CONFIG"):
+    (out / ".config").write_text(os.environ["FINAL_KSU_CONFIG"])
 boot = out / "arch/arm64/boot"
 if "dtbo.img" in args:
     dts = boot / "dts/vendor/qcom"
@@ -56,6 +58,12 @@ args = sys.argv[1:]
 if args[0] == "submodule":
     with open(os.environ["GIT_LOG"], "a") as log:
         log.write(repr(args) + "\n")
+    cached_url = pathlib.Path("cached-ksu-url")
+    if "sync" in args and "KernelSU" in args and cached_url.exists():
+        cached_url.write_text("https://github.com/backslashxx/KernelSU.git")
+    if "update" in args and "KernelSU" in args and cached_url.exists():
+        if cached_url.read_text() != "https://github.com/backslashxx/KernelSU.git":
+            sys.exit(49)
     if "update" in args and "KernelSU" in args and os.environ.get("KSU_UNAVAILABLE"):
         sys.exit(48)
     if "update" in args and os.environ.get("FAIL_SUBMODULE"):
@@ -112,7 +120,9 @@ class BuildScriptsTest(unittest.TestCase):
             "vendor/samsung/kona-sec-common.config": "CONFIG_COMMON=y\n",
             "vendor/samsung/r8q.config": "CONFIG_SEC_R8Q_PROJECT=y\n",
             "vendor/not/localversion.config": 'CONFIG_LOCALVERSION="-not"\n',
-            "vendor/not/ksu.config": "CONFIG_KSU=y\n",
+            "vendor/not/ksu.config": (
+                "CONFIG_KSU=y\nCONFIG_KSU_HACK_ARM64_BRANCH_LINK=y\n"
+                "CONFIG_KSU_LSM_SECURITY_HOOKS=y\n"),
             "vendor/not/permissive.config": "CONFIG_SECURITY_SELINUX_PERMISSIVE=y\n",
         }
         for path, text in configs.items():
@@ -126,10 +136,11 @@ class BuildScriptsTest(unittest.TestCase):
         self.env.update(PATH=str(self.bin) + os.pathsep + self.env["PATH"],
                         JOBS="2", MAKE_LOG=str(self.root / "make.jsonl"),
                         GIT_LOG=str(self.root / "git.log"))
-        for name in ("Kconfig", "Makefile"):
-            path = self.root / "drivers/kernelsu" / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("# KernelSU fixture\n")
+        for source in ("drivers/kernelsu", "security/baseband-guard", "fs/nomount"):
+            for name in ("Kconfig", "Makefile"):
+                path = self.root / source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# dependency fixture\n")
         (self.root / "arch/arm64/configs/vendor/not/no-ksu.config").write_text(
             "# CONFIG_KSU is not set\n")
         self.old_zip = self.root / "not-previous.zip"
@@ -253,6 +264,36 @@ class BuildScriptsTest(unittest.TestCase):
     def test_rooted_variant_rejects_missing_source(self):
         shutil.rmtree(self.root / "drivers/kernelsu")
         self.assert_failure(self.run_build("ksu"), "KernelSU source is missing")
+
+    def test_existing_clone_migrates_cached_kernelsu_url(self):
+        cached_url = self.root / "cached-ksu-url"
+        cached_url.write_text("https://github.com/doubledashdot/sKernelSU")
+        self.check_success(self.run_build("ksu"), "Image.gz", "ksu")
+
+    def test_missing_dependency_paths_fail_before_make(self):
+        for dependency in ("security/baseband-guard", "fs/nomount"):
+            with self.subTest(dependency=dependency):
+                path = self.root / dependency / "Kconfig"
+                path.unlink()
+                self.assert_failure(self.run_build(), "Missing dependency file: " + dependency)
+                self.assertFalse((self.root / "make.jsonl").exists())
+                path.write_text("# dependency fixture\n")
+
+    def test_effective_config_must_match_variant(self):
+        for variant, config in (
+            ("ksu", "# CONFIG_KSU is not set\n"),
+            ("ksu+permissive", "CONFIG_KSU=m\n"),
+            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_LSM_SECURITY_HOOKS=y\n"),
+            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_HACK_ARM64_BRANCH_LINK=y\n"),
+            ("stock", "CONFIG_KSU=y\n"),
+            ("stock", "CONFIG_KSU=m\n"),
+        ):
+            with self.subTest(variant=variant, config=config):
+                self.assert_failure(self.run_build(variant, extra={"FINAL_KSU_CONFIG": config}),
+                                    "The final")
+                calls = (self.root / "make.jsonl").read_text()
+                self.assertNotIn("dtbo.img", calls)
+                self.assertNotIn("Image.gz", calls)
 
     def test_missing_or_empty_boot_outputs(self):
         for name in ("DTB_MODE", "DTBO_MODE", "IMAGE_MODE"):

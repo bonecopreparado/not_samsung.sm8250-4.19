@@ -22,6 +22,41 @@ It also works when the KernelSU repository is unavailable. The `ksu` variants
 still require the pinned KernelSU source; they fail rather than silently
 producing a build without root. Dependency downloads never ask for credentials.
 
+### KernelSU source and migration
+
+Rooted variants use [backslashxx/KernelSU](https://github.com/backslashxx/KernelSU),
+pinned to release [v3.3.0-30](https://github.com/backslashxx/KernelSU/releases/tag/v3.3.0-30)
+at commit `86fe5e4ef22917b76a38c23cb55aa081570ff561`. This replaces the unavailable
+`doubledashdot/sKernelSU` dependency. The kernel tree, upstream credits and
+licenses are retained.
+
+This fork exposes the ARM64 branch-link and LSM hook options already selected
+by this kernel's KSU fragment. The build retains that integration method and
+checks that those options, and built-in `CONFIG_KSU=y`, survive `olddefconfig`.
+The obsolete `KSU_FEATURE_ADBROOT_DEFAULT_ENABLE` setting has been removed.
+Compatibility of the resulting kernel still needs a full build and device test.
+
+After checking out the updated kernel branch, the build scripts synchronize
+cached submodule URLs before fetching the exact recorded commits. To do the
+same manually in an existing checkout:
+
+```sh
+git submodule sync --recursive -- Baseband-guard NoMount KernelSU
+GIT_TERMINAL_PROMPT=0 git submodule update --init --recursive -- Baseband-guard NoMount KernelSU
+```
+
+Do not use `git submodule update --remote` to reproduce this version: that
+would replace the recorded pin with a moving branch. Retain the tracked
+symlinks `drivers/kernelsu`, `security/baseband-guard` and `fs/nomount`;
+the scripts check their source files before starting the toolchain/build.
+
+Use the Manager APK from the same Backslash release for initial testing.
+Its release notes require a driver using UAPI v4 and warn that application
+profiles may reset. Recheck root grants after migration; compatibility with
+the old sKernelSU Manager and modules is not assumed.
+
+### Build commands
+
 ```sh
 # Interactive device/variant selection:
 ./build-local.sh
