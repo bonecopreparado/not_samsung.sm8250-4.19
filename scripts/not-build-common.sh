@@ -65,13 +65,19 @@ prepare_toolchain() {
 
 build_kernel() {
     local device=$1 variant=$2 image=$3 valid=false model fragment source_file option
-    local jobs=${JOBS:-$(nproc)} source_sha dirty=false
+    local jobs=${JOBS:-$(nproc)} source_sha dirty=false ufs_axi=${UFS_AXI_MHZ:-300}
     local out="$PWD/out" boot dts dtb ak3 zipname toolchain_version ak3_sha
+    local root_provider=none susfs_version=disabled package_variant=$variant
     local -a configs make_args dtbs submodules
     for model in "${VALID_MODELS[@]}"; do
         [[ "$device" != "$model" ]] || valid=true
     done
     [[ "$valid" == true ]] || die "Unsupported device: $device"
+    case "$ufs_axi" in
+        300) ;;
+        333) [[ "$device" == r8q ]] || die 'UFS_AXI_MHZ=333 is only supported for r8q.' ;;
+        *) die 'UFS_AXI_MHZ must be 300 or 333.' ;;
+    esac
     [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || die 'JOBS must be a positive integer.'
     [[ -z "${AK3_COMMIT:-}" || "$AK3_COMMIT" =~ ^[[:xdigit:]]{40}$ ]] ||
         die 'AK3_COMMIT must be a full 40-digit commit SHA.'
@@ -80,15 +86,21 @@ build_kernel() {
         "vendor/samsung/$device.config")
     case "$variant" in
         stock) configs+=(vendor/not/no-ksu.config) ;;
-        ksu) configs+=(vendor/not/ksu.config) ;;
-        ksu+permissive) configs+=(vendor/not/ksu.config vendor/not/permissive.config) ;;
+        ksu) configs+=(vendor/not/ksu.config); package_variant=sukisu-susfs ;;
+        ksu+permissive) configs+=(vendor/not/ksu.config vendor/not/permissive.config)
+            package_variant=sukisu-susfs-permissive ;;
         *) die "Unsupported variant: $variant" ;;
     esac
     configs+=(vendor/not/localversion.config)
+    if [[ "$ufs_axi" == 333 ]]; then
+        configs+=(vendor/not/ufs-333.config)
+    else
+        configs+=(vendor/not/ufs-default.config)
+    fi
     for fragment in "${configs[@]}"; do
         [[ -f "arch/arm64/configs/$fragment" ]] || die "Missing config: $fragment"
     done
-    require_commands git make zip unzip find sort sha256sum mktemp realpath flock
+    require_commands git make zip unzip find sort sha256sum mktemp realpath flock python3
     mkdir -p "$out"
     # One output/cache tree must not be built concurrently by the two entry points.
     exec 9>"$out/.not-build.lock"
@@ -115,7 +127,14 @@ build_kernel() {
     if [[ "$variant" != stock ]]; then
         [[ -s drivers/kernelsu/Kconfig && -s drivers/kernelsu/Makefile ]] ||
             die 'KernelSU source is missing; refusing to produce a rooted variant without it.'
+        for source_file in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+            [[ -s "$source_file" ]] || die "Missing SUSFS source: $source_file"
+        done
+        bash scripts/prepare-sukisu.sh
+        root_provider=SukiSU
+        susfs_version=v2.1.0
     fi
+    bash scripts/prepare-nomount.sh
     prepare_toolchain
     source_sha=$(git rev-parse --verify HEAD)
     [[ -z "$(git status --porcelain --untracked-files=no)" ]] || dirty=true
@@ -124,20 +143,32 @@ build_kernel() {
     make_args=("-j$jobs" "O=$out" ARCH=arm64 CC=clang LD=ld.lld AS=llvm-as
         AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump
         STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu-
-        CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1)
+        CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 PYTHON=python3)
 
     printf 'Building %s (%s) with %s jobs\n' "$device" "$variant" "$jobs"
     make "${make_args[@]}" "${configs[@]}"
     make "${make_args[@]}" olddefconfig
+
+    if [[ "$ufs_axi" == 333 ]]; then
+        grep -Fxq 'CONFIG_R8Q_UFS_AXI_333MHZ=y' "$out/.config" ||
+            die 'The final configuration did not enable the requested UFS AXI overclock.'
+    elif grep -Eq '^CONFIG_R8Q_UFS_AXI_333MHZ=[ym]$' "$out/.config"; then
+        die 'The default configuration unexpectedly enabled the UFS AXI overclock.'
+    fi
 
     # Kconfig may silently drop requested symbols when dependencies are unmet.
     if [[ "$variant" == stock ]]; then
         grep -Fxq '# CONFIG_KSU is not set' "$out/.config" ||
             die 'The final stock configuration did not disable KernelSU.'
     else
-        for option in KSU KSU_HACK_ARM64_BRANCH_LINK KSU_LSM_SECURITY_HOOKS; do
+        for option in KSU KSU_LSM_HOOKS KSU_MANUAL_HOOK KSU_SUSFS; do
             grep -Fxq "CONFIG_$option=y" "$out/.config" ||
                 die "The final $variant configuration is missing CONFIG_$option=y."
+        done
+        for option in KPM KSU_DEBUG KSU_MANUAL_SU; do
+            if grep -Eq "^CONFIG_$option=[ym]$" "$out/.config"; then
+                die "The final $variant configuration unexpectedly enabled CONFIG_$option."
+            fi
         done
     fi
 
@@ -174,7 +205,7 @@ build_kernel() {
     cp -- "$boot/$image" "$boot/dtb" "$boot/dtbo.img" "$ak3/"
 
     # Unique filenames preserve prior builds, including retries on the same commit.
-    zipname="not-${variant//+/-}-$(date -u '+%Y%m%d-%H%M%S')-${source_sha:0:8}-$device-${BUILD_TMP##*.}.zip"
+    zipname="not-${package_variant}-ufs${ufs_axi}-$(date -u '+%Y%m%d-%H%M%S')-${source_sha:0:8}-$device-${BUILD_TMP##*.}.zip"
     (cd "$ak3" && zip -qr9 "$BUILD_TMP/$zipname" . \
         -x '.git' '.git/*' '.gitignore' 'README.md' '*placeholder')
     unzip -tq "$BUILD_TMP/$zipname"
@@ -184,6 +215,14 @@ build_kernel() {
             "$source_sha" "$dirty" "$device" "$variant"
         printf 'image=%s\njobs=%s\nplatform_version=%s\nanykernel_commit=%s\n' \
             "$image" "$jobs" "$PLATFORM_VERSION" "$ak3_sha"
+        printf 'ufs_axi_profile_mhz=%s\n' "$ufs_axi"
+        printf 'root_provider=%s\nsusfs_version=%s\n' "$root_provider" "$susfs_version"
+        printf '\nNoMount patch hashes:\n'
+        sha256sum patches/nomount/*.patch
+        if [[ "$variant" != stock ]]; then
+            printf '\nSukiSU patch hashes:\n'
+            sha256sum patches/sukisu/*.patch
+        fi
         printf 'clang_version=%s\n' "${toolchain_version%%$'\n'*}"
         if [[ -f "$TC_DIR/.not-toolchain.txt" ]]; then
             cat "$TC_DIR/.not-toolchain.txt"

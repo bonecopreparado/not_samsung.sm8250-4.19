@@ -32,6 +32,17 @@
 #include <linux/dnotify.h>
 #include <linux/compat.h>
 
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+extern bool ksu_su_compat_enabled __read_mostly;
+extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
+                              int *mode, int *flags);
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+extern struct filename *susfs_open_redirect_spoof_do_sys_openat(struct inode *inode);
+#endif
+
 #include "internal.h"
 #include <trace/hooks/syscall_check.h>
 
@@ -414,6 +425,12 @@ long do_faccessat(int dfd, const char __user *filename, int mode, int flags)
 	int res;
 	unsigned int lookup_flags = LOOKUP_FOLLOW;
 	const struct cred *old_cred = NULL;
+
+#ifdef CONFIG_KSU_SUSFS
+	if (!susfs_is_current_proc_umounted() && READ_ONCE(ksu_su_compat_enabled) &&
+	    __ksu_is_allow_uid_for_current(current_uid().val))
+		ksu_handle_faccessat(&dfd, &filename, &mode, &flags);
+#endif
 
 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
 		return -EINVAL;
@@ -1190,6 +1207,9 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 	struct open_flags op;
 	int fd = build_open_flags(flags, mode, &op);
 	struct filename *tmp;
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	bool is_inode_open_redirect = false;
+#endif
 
 	if (fd)
 		return fd;
@@ -1199,8 +1219,24 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 		return PTR_ERR(tmp);
 
 	fd = get_unused_fd_flags(flags);
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+retry:
+#endif
 	if (fd >= 0) {
 		struct file *f = do_filp_open(dfd, tmp, &op);
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+		if (!is_inode_open_redirect && !IS_ERR(f) &&
+		    SUSFS_IS_INODE_OPEN_REDIRECT_WITHOUT_UID_CHECK(file_inode(f))) {
+			struct filename *fake = susfs_open_redirect_spoof_do_sys_openat(file_inode(f));
+			if (!IS_ERR_OR_NULL(fake)) {
+				is_inode_open_redirect = true;
+				filp_close(f, NULL);
+				putname(tmp);
+				tmp = fake;
+				goto retry;
+			}
+		}
+#endif
 		if (IS_ERR(f) && !libperfmgr_redirect(&f, dfd, tmp, &op, flags)) {
 			put_unused_fd(fd);
 			fd = PTR_ERR(f);
