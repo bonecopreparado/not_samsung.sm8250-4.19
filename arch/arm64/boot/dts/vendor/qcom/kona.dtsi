@@ -2108,7 +2108,11 @@
 			<&clock_gcc GCC_UFS_PHY_RX_SYMBOL_0_CLK>,
 			<&clock_gcc GCC_UFS_PHY_RX_SYMBOL_1_CLK>;
 		freq-table-hz =
+#ifdef CONFIG_R8Q_UFS_AXI_333MHZ
+			<37500000 333333333>,
+#else
 			<37500000 300000000>,
+#endif
 			<0 0>,
 			<0 0>,
 			<37500000 300000000>,

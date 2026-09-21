@@ -294,6 +294,17 @@ config MSM_GCC_KONA
 	  Say Y if you want to use peripheral devices such as UART, SPI, I2C,
 	  USB, UFS, SD/eMMC, PCIe, etc.
 
+config R8Q_UFS_AXI_333MHZ
+	bool "Experimental r8q UFS AXI clock at 333 MHz"
+	depends on SEC_R8Q_PROJECT && MSM_GCC_KONA && SCSI_UFS_QCOM
+	default n
+	help
+	  Add a 333333333 Hz operating point for the r8q UFS AXI clock.
+	  This uses the existing 600 MHz GPLL0 with a 5/9 M/N divider
+	  and the VDD_HIGH voltage corner. UniPro and ICE stay unchanged.
+	  This is an unvalidated storage overclock and may cause I/O
+	  errors or data loss. Leave disabled for ordinary builds.
+
 config MSM_VIDEOCC_KONA
 	tristate "KONA Video Clock Controller"
 	depends on COMMON_CLK_QCOM

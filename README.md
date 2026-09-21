@@ -22,38 +22,78 @@ It also works when the KernelSU repository is unavailable. The `ksu` variants
 still require the pinned KernelSU source; they fail rather than silently
 producing a build without root. Dependency downloads never ask for credentials.
 
-### KernelSU source and migration
+### SukiSU and SUSFS integration
 
-Rooted variants use [backslashxx/KernelSU](https://github.com/backslashxx/KernelSU),
-pinned to release [v3.3.0-30](https://github.com/backslashxx/KernelSU/releases/tag/v3.3.0-30)
-at commit `86fe5e4ef22917b76a38c23cb55aa081570ff561`. This replaces the unavailable
-`doubledashdot/sKernelSU` dependency. The kernel tree, upstream credits and
-licenses are retained.
+Rooted variants now use [SukiSU-Ultra's builtin driver](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/624727d1077f5afea894f066bcb8ca70079cf802),
+pinned at `624727d1077f5afea894f066bcb8ca70079cf802`, replacing Backslash KernelSU.
+The kernel contains the [SUSFS 2.1.0 port for 4.19](https://github.com/TheNoxS1d/susfs-kernel-4.19/commit/5e4f1930c9022b79559f3d337ef59e75a5562037),
+adapted to this tree's VFS backports. These are deliberately matched revisions;
+they are not the latest SukiSU or SUSFS releases. KPM, manual-su and debug mode
+are disabled. Normal `ksu` builds retain SELinux enforcing.
 
-This fork exposes the ARM64 branch-link and LSM hook options already selected
-by this kernel's KSU fragment. The build retains that integration method and
-checks that those options, and built-in `CONFIG_KSU=y`, survive `olddefconfig`.
-The obsolete `KSU_FEATURE_ADBROOT_DEFAULT_ENABLE` setting has been removed.
-Compatibility of the resulting kernel still needs a full build and device test.
+The build applies `patches/sukisu/*.patch` to the exact SukiSU pin. These patches
+make version generation offline, handle this tree's disabled seccomp configuration,
+fix a package-list bounds read, and backport the root-grant revocation check.
+The scripts require the final config to contain built-in KSU, LSM/manual hooks
+and SUSFS, and reject accidental enabling of KPM/debug/manual-su.
+See [integration notes](Documentation/notkernel/sukisu-susfs.md) for sources,
+local changes and validation scope.
 
-After checking out the updated kernel branch, the build scripts synchronize
-cached submodule URLs before fetching the exact recorded commits. To do the
-same manually in an existing checkout:
+Use the [official v4.1.2 Manager APK](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/download/v4.1.2/SukiSU_v4.1.2_40545-release.apk)
+for the initial test. The build does not install or update apps or modules on
+the phone. Recheck root grants after replacing the Backslash Manager. Start
+with modules disabled, then test modules one at a time. SUSFS support alone
+does not configure hiding rules or guarantee compatibility with an app.
+Any companion SUSFS tools must support the pinned 2.1.0 kernel interface.
+
+The previous `e0a6f4ad` Backslash build completed on the maintainer's Ubuntu host
+and a tester reported booting OneUI 8.5 on r8q. That result does not validate
+the SukiSU/SUSFS, NoMount or clock changes in this branch.
+
+After checking out the updated kernel branch, the scripts synchronize cached
+submodule URLs and fetch the recorded commits automatically. For manual builds:
 
 ```sh
 git submodule sync --recursive -- Baseband-guard NoMount KernelSU
 GIT_TERMINAL_PROMPT=0 git submodule update --init --recursive -- Baseband-guard NoMount KernelSU
+bash scripts/prepare-nomount.sh
+bash scripts/prepare-sukisu.sh
 ```
 
-Do not use `git submodule update --remote` to reproduce this version: that
-would replace the recorded pin with a moving branch. Retain the tracked
-symlinks `drivers/kernelsu`, `security/baseband-guard` and `fs/nomount`;
-the scripts check their source files before starting the toolchain/build.
+Do not use `git submodule update --remote` to reproduce this version. Retain the
+tracked symlinks `drivers/kernelsu`, `security/baseband-guard` and `fs/nomount`.
+Patched submodules intentionally appear modified; repeat preparation is safe
+and conflicts stop the build without discarding local changes. Before switching
+back to an older branch, reverse this branch's SukiSU patch from the repository
+root with `git -C KernelSU apply --reverse "$PWD/patches/sukisu/0001-adapt-builtin-driver-for-notkernel.patch"`.
+Stop if it conflicts, then switch branches and update submodules normally.
 
-Use the Manager APK from the same Backslash release for initial testing.
-Its release notes require a driver using UAPI v4 and warn that application
-profiles may reset. Recheck root grants after migration; compatibility with
-the old sKernelSU Manager and modules is not assumed.
+### NoMount update and local fixes
+
+NoMount is pinned to [upstream dev commit d6cb7158](https://github.com/maxsteeel/nomount/commit/d6cb7158b5a98a8168fa7bae191e23cbcfd38974),
+22 commits after the previous `9122a0bf` pin. The two commits after upstream
+`master` provide explicit SRCU initialization and dentry-cache invalidation
+fixes. This is a development snapshot, not a newly tagged stable release.
+It also includes upstream changes to rule lookup/removal, directory lifetimes
+and batched clearing. No device performance gain is assumed from those changes.
+
+The build applies `patches/nomount/*.patch` through `scripts/prepare-nomount.sh`.
+The local fixes check ART allocations, propagate errors before publishing
+rules, clean up partially constructed directory topology, and allow the
+child counter to represent all 256 entries. Patch application is idempotent
+and refuses conflicting local edits or a different upstream commit.
+
+The patched NoMount checkout intentionally appears modified in `git status`;
+the committed patch series and its hashes in the build metadata describe those
+changes. Keep additional edits separate when reproducing a build. For manual
+kernel builds, run `bash scripts/prepare-nomount.sh` after submodule setup.
+If switching back to an older kernel branch, first reverse this branch's patch
+with `git -C NoMount apply --reverse "$PWD/patches/nomount/0001-handle-art-allocation-failures.patch"`;
+stop if it conflicts, then switch branches and update the submodules normally.
+
+For NoMount module tests, use userspace/metamodule built from the same pinned
+upstream revision. This change does not update modules already installed on
+the phone. Check rule addition/removal and exclusions after the update.
 
 ### Build commands
 
@@ -64,10 +104,10 @@ the old sKernelSU Manager and modules is not assumed.
 # S20 FE (r8q), with KernelSU explicitly disabled:
 JOBS=12 ./build-local.sh r8q stock
 
-# KernelSU, using the same local build entry point:
+# SukiSU + SUSFS, keeping the existing ksu command:
 JOBS=12 ./build-local.sh r8q ksu
 
-# Existing CI entry point: KernelSU by default, uncompressed Image:
+# Existing CI entry point: SukiSU + SUSFS by default, uncompressed Image:
 DEVICE=r8q JOBS=12 ./build.sh
 ```
 
@@ -79,14 +119,47 @@ SELinux permissive configuration; use `stock` or `ksu` for ordinary testing.
 stock kernel. `JOBS` defaults to the CPUs available to the current process.
 Both scripts can be called from another working directory.
 
+### Experimental UFS AXI profile for r8q
+
+The default remains **300 MHz**. To compare the same source at both profiles:
+
+```sh
+JOBS=12 UFS_AXI_MHZ=300 ./build-local.sh r8q ksu
+JOBS=12 UFS_AXI_MHZ=333 ./build-local.sh r8q ksu
+```
+
+`333` enables `CONFIG_R8Q_UFS_AXI_333MHZ` and requests **333,333,333 Hz on
+GCC_UFS_PHY_AXI_CLK**. The clock table uses the existing 600 MHz GPLL0 with
+an M/N divider of 5/9; the shared PLL is not retuned. The DT maximum and
+clock driver's voltage limits are changed together. The new frequency votes
+for **VDD_HIGH**, which can increase power consumption and heat. UFS UniPro,
+ICE and device reference clocks remain unchanged. This is an AXI-bus experiment,
+not a verified 333 MHz setting for every UFS clock or a storage-throughput claim.
+
+This profile has not been validated on hardware. Storage overclocking can cause
+I/O errors or data corruption: back up data and keep the tested kernel available
+before flashing an experimental build. Validate the updated 300 MHz build first.
+Then compare boot, suspend/resume, temperature and storage read/write integrity
+with the same ROM, modules, compiler and AnyKernel3 revision. Stop testing the
+OC profile if UFS resets/timeouts, I/O errors or corrupted files occur. Benchmark
+only ordinary test files; do not write directly to block devices.
+
+The build rejects `333` for other devices and checks the resolved configuration.
+Selecting `300` again explicitly disables the option, including incremental
+builds. ZIP names contain `ufs300` or `ufs333`, and the profile is recorded in
+the build metadata. Rooted ZIPs are labeled `sukisu-susfs`; the build info also
+records the root provider, SUSFS version and both patch hashes. Neither profile
+is automatically flashed.
+
 Every successful build leaves a uniquely named ZIP in the repository root,
 plus `.zip.sha256`, `.zip.config` and `.zip.build-info.txt` sidecars. The
 checksum file covers the ZIP and both metadata files. Verify it with
 `sha256sum -c <filename>.zip.sha256` from the repository root. The build info
 records the source commit, tracked dirty state, submodule commits, AnyKernel3
 commit, compiler version and boot artifact hashes. Keep these files together.
-Dirty source changes themselves are not captured; commit changes before
-making a release.
+Additional dirty source changes themselves are not captured; commit changes
+before making a release. The expected NoMount and SukiSU patch series is committed in
+the parent kernel repository as described above.
 
 The scripts stop on failed commands or missing/empty boot artifacts. They
 rebuild boot outputs while keeping other compiled objects, preserve existing
@@ -117,13 +190,19 @@ guarantee byte-identical kernels; build timestamps and host tools also matter.
 ### Build-script regression checks
 
 ```sh
-bash -n build.sh build-local.sh scripts/not-build-common.sh
-python3 -m unittest discover -s tests -p 'test_not_build.py' -v
+bash -n build.sh build-local.sh scripts/not-build-common.sh scripts/prepare-nomount.sh scripts/prepare-sukisu.sh
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-The tests use simulated compiler/make output and a local packaging fixture;
-they do not download dependencies or compile/boot a kernel. Hardware testing
-on the target ROM is still required before calling a build stable.
+The build-script tests use simulated compiler/make output and a local packaging
+fixture. With the pinned NoMount submodule initialized, the NoMount tests also
+verify real patch application and compile its ART code in a host harness using
+GCC's address/undefined-behavior sanitizers. They cover allocation failures at
+all five ART allocation sites, 256-way branching, UID chains and 15,000 repeated
+insert/remove operations. They do not test VFS concurrency, compile a full kernel
+or boot a phone. In tracing environments where LeakSanitizer cannot run, use
+`ASAN_OPTIONS=detect_leaks=0`; the harness still checks its ART allocation count.
+Hardware testing on the target ROM is required before calling a build stable.
 
 # Introduction
 - This repository is always compliant with the latest LineageOS common sm8250 kernel changes.

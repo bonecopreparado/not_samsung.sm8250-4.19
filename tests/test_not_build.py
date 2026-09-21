@@ -60,9 +60,9 @@ if args[0] == "submodule":
         log.write(repr(args) + "\n")
     cached_url = pathlib.Path("cached-ksu-url")
     if "sync" in args and "KernelSU" in args and cached_url.exists():
-        cached_url.write_text("https://github.com/backslashxx/KernelSU.git")
+        cached_url.write_text("https://github.com/SukiSU-Ultra/SukiSU-Ultra.git")
     if "update" in args and "KernelSU" in args and cached_url.exists():
-        if cached_url.read_text() != "https://github.com/backslashxx/KernelSU.git":
+        if cached_url.read_text() != "https://github.com/SukiSU-Ultra/SukiSU-Ultra.git":
             sys.exit(49)
     if "update" in args and "KernelSU" in args and os.environ.get("KSU_UNAVAILABLE"):
         sys.exit(48)
@@ -84,7 +84,9 @@ elif args[0] == "clone":
         (dest / "tools/ak3-core.sh").unlink()
 elif args[0] == "-C":
     if "rev-parse" in args:
-        print(os.environ.get("AK3_COMMIT", "b" * 40))
+        print("d6cb7158b5a98a8168fa7bae191e23cbcfd38974" if args[1] == "NoMount"
+              else "624727d1077f5afea894f066bcb8ca70079cf802" if args[1] == "KernelSU"
+              else os.environ.get("AK3_COMMIT", "b" * 40))
     elif "fetch" in args and os.environ.get("FAIL_AK3_FETCH"):
         sys.exit(45)
 elif args[0] == "rev-parse":
@@ -103,10 +105,17 @@ class BuildScriptsTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / "kernel"
         self.root.mkdir()
-        for name in ("build.sh", "build-local.sh", "scripts/not-build-common.sh"):
+        for name in ("build.sh", "build-local.sh", "scripts/not-build-common.sh",
+                     "scripts/prepare-nomount.sh", "scripts/prepare-sukisu.sh"):
             dest = self.root / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, dest)
+        shutil.copytree(ROOT / "patches/nomount", self.root / "patches/nomount")
+        shutil.copytree(ROOT / "patches/sukisu", self.root / "patches/sukisu")
+        for source in ("fs/susfs.c", "include/linux/susfs.h", "include/linux/susfs_def.h"):
+            path = self.root / source
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("/* SUSFS fixture */\n")
         self.bin = Path(self.temp.name) / "bin"
         self.bin.mkdir()
         self.write_command(self.bin / "make", FAKE_MAKE)
@@ -121,9 +130,11 @@ class BuildScriptsTest(unittest.TestCase):
             "vendor/samsung/r8q.config": "CONFIG_SEC_R8Q_PROJECT=y\n",
             "vendor/not/localversion.config": 'CONFIG_LOCALVERSION="-not"\n',
             "vendor/not/ksu.config": (
-                "CONFIG_KSU=y\nCONFIG_KSU_HACK_ARM64_BRANCH_LINK=y\n"
-                "CONFIG_KSU_LSM_SECURITY_HOOKS=y\n"),
+                "CONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n"
+                "CONFIG_KSU_LSM_HOOKS=y\nCONFIG_KSU_SUSFS=y\n"),
             "vendor/not/permissive.config": "CONFIG_SECURITY_SELINUX_PERMISSIVE=y\n",
+            "vendor/not/ufs-333.config": "CONFIG_R8Q_UFS_AXI_333MHZ=y\n",
+            "vendor/not/ufs-default.config": "# CONFIG_R8Q_UFS_AXI_333MHZ is not set\n",
         }
         for path, text in configs.items():
             dest = self.root / "arch/arm64/configs" / path
@@ -131,7 +142,7 @@ class BuildScriptsTest(unittest.TestCase):
             dest.write_text(text)
         self.env = os.environ.copy()
         for name in ("DEVICE", "BUILD_VARIANT", "TC_DIR", "JOBS", "CLANG_URL",
-                     "CLANG_SHA256", "AK3_COMMIT", "PLATFORM_VERSION"):
+                     "CLANG_SHA256", "AK3_COMMIT", "PLATFORM_VERSION", "UFS_AXI_MHZ"):
             self.env.pop(name, None)
         self.env.update(PATH=str(self.bin) + os.pathsep + self.env["PATH"],
                         JOBS="2", MAKE_LOG=str(self.root / "make.jsonl"),
@@ -197,12 +208,17 @@ class BuildScriptsTest(unittest.TestCase):
         info = Path(str(archive) + ".build-info.txt").read_text()
         self.assertIn("source_commit=" + SOURCE_SHA, info)
         self.assertIn("variant=" + variant, info)
+        self.assertIn("root_provider=" + ("none" if variant == "stock" else "SukiSU"), info)
+        self.assertIn("susfs_version=" + ("disabled" if variant == "stock" else "v2.1.0"), info)
+        self.assertEqual("SukiSU patch hashes:" in info, variant != "stock")
+        self.assertEqual("-sukisu-susfs-" in archive.name, variant != "stock")
         self.assertIn("clang_version=fixture clang 1.0", info)
         check = subprocess.run(["sha256sum", "-c", archive.name + ".sha256"],
                                cwd=self.root, text=True, capture_output=True)
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
         calls = [json.loads(line) for line in (self.root / "make.jsonl").read_text().splitlines()]
         self.assertTrue(all("CC=clang" in call and "-j2" in call for call in calls))
+        self.assertTrue(all("PYTHON=python3" in call for call in calls))
         self.assert_preserved()
         return archive
 
@@ -221,6 +237,30 @@ class BuildScriptsTest(unittest.TestCase):
                            "Image", "ksu")
         self.check_success(self.run_build(script="build.sh", extra={
             "DEVICE": "r8q", "BUILD_VARIANT": "stock"}), "Image", "stock")
+
+    def test_ufs_profiles_and_return_to_default(self):
+        for mhz in ("333", "300"):
+            with self.subTest(mhz=mhz):
+                archive = self.check_success(self.run_build(extra={"UFS_AXI_MHZ": mhz}),
+                                             "Image.gz", "stock")
+                self.assertIn("-ufs" + mhz + "-", archive.name)
+                config = Path(str(archive) + ".config").read_text()
+                self.assertEqual("CONFIG_R8Q_UFS_AXI_333MHZ=y" in config, mhz == "333")
+                info = Path(str(archive) + ".build-info.txt").read_text()
+                self.assertIn("ufs_axi_profile_mhz=" + mhz, info)
+                self.assertIn("NoMount patch hashes:", info)
+
+    def test_ufs_rejects_invalid_device_rate_and_resolved_config(self):
+        self.assert_failure(self.run_build(extra={"UFS_AXI_MHZ": "334"}),
+                            "UFS_AXI_MHZ must be")
+        self.assert_failure(self.run_build(extra={"UFS_AXI_MHZ": "333"},
+                                          args=["x1q", "stock"]), "only supported for r8q")
+        self.assert_failure(self.run_build(extra={"UFS_AXI_MHZ": "333",
+                                                 "FINAL_KSU_CONFIG": "# CONFIG_KSU is not set\n"}),
+                            "did not enable the requested UFS")
+        self.assert_failure(self.run_build(extra={
+            "FINAL_KSU_CONFIG": "# CONFIG_KSU is not set\nCONFIG_R8Q_UFS_AXI_333MHZ=y\n"}),
+            "unexpectedly enabled")
 
     def test_interactive(self):
         self.check_success(self.run_build(args=[], input_text="R8Q\nKSU\n"),
@@ -265,6 +305,19 @@ class BuildScriptsTest(unittest.TestCase):
         shutil.rmtree(self.root / "drivers/kernelsu")
         self.assert_failure(self.run_build("ksu"), "KernelSU source is missing")
 
+    def test_rooted_variant_requires_susfs_source(self):
+        (self.root / "fs/susfs.c").unlink()
+        self.assert_failure(self.run_build("ksu"), "Missing SUSFS source")
+        self.assertFalse((self.root / "make.jsonl").exists())
+
+    def test_rooted_variant_rejects_unrequested_features(self):
+        required = "CONFIG_KSU=y\nCONFIG_KSU_LSM_HOOKS=y\nCONFIG_KSU_MANUAL_HOOK=y\nCONFIG_KSU_SUSFS=y\n"
+        for option in ("KPM", "KSU_DEBUG", "KSU_MANUAL_SU"):
+            with self.subTest(option=option):
+                self.assert_failure(self.run_build("ksu", extra={
+                    "FINAL_KSU_CONFIG": required + "CONFIG_" + option + "=y\n"}),
+                    "unexpectedly enabled CONFIG_" + option)
+
     def test_existing_clone_migrates_cached_kernelsu_url(self):
         cached_url = self.root / "cached-ksu-url"
         cached_url.write_text("https://github.com/doubledashdot/sKernelSU")
@@ -283,8 +336,9 @@ class BuildScriptsTest(unittest.TestCase):
         for variant, config in (
             ("ksu", "# CONFIG_KSU is not set\n"),
             ("ksu+permissive", "CONFIG_KSU=m\n"),
-            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_LSM_SECURITY_HOOKS=y\n"),
-            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_HACK_ARM64_BRANCH_LINK=y\n"),
+            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_LSM_HOOKS=y\nCONFIG_KSU_MANUAL_HOOK=y\n"),
+            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_SUSFS=y\nCONFIG_KSU_MANUAL_HOOK=y\n"),
+            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_LSM_HOOKS=y\nCONFIG_KSU_SUSFS=y\n"),
             ("stock", "CONFIG_KSU=y\n"),
             ("stock", "CONFIG_KSU=m\n"),
         ):
