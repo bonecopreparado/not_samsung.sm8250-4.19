@@ -149,6 +149,14 @@ build_kernel() {
     make "${make_args[@]}" "${configs[@]}"
     make "${make_args[@]}" olddefconfig
 
+    # Android media sandboxes require seccomp, including in stock r8q builds.
+    if [[ "$device" == r8q ]]; then
+        for option in SECCOMP SECCOMP_FILTER; do
+            grep -Fxq "CONFIG_$option=y" "$out/.config" ||
+                die "The final r8q configuration is missing CONFIG_$option=y; Android media services require seccomp."
+        done
+    fi
+
     if [[ "$ufs_axi" == 333 ]]; then
         grep -Fxq 'CONFIG_R8Q_UFS_AXI_333MHZ=y' "$out/.config" ||
             die 'The final configuration did not enable the requested UFS AXI overclock.'

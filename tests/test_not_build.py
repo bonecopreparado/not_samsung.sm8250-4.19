@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SHA = "a" * 40
 TOOLS = ("clang", "ld.lld", "llvm-as", "llvm-ar", "llvm-nm", "llvm-objcopy",
          "llvm-objdump", "llvm-strip")
+SECCOMP_CONFIG = "CONFIG_SECCOMP=y\nCONFIG_SECCOMP_FILTER=y\n"
 
 FAKE_MAKE = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -32,7 +33,14 @@ if configs:
     (out / ".config").write_text("".join(
         (pathlib.Path("arch/arm64/configs") / c).read_text() for c in configs))
 if "olddefconfig" in args and os.environ.get("FINAL_KSU_CONFIG"):
-    (out / ".config").write_text(os.environ["FINAL_KSU_CONFIG"])
+    (out / ".config").write_text(os.environ["FINAL_KSU_CONFIG"] +
+                                "CONFIG_SECCOMP=y\nCONFIG_SECCOMP_FILTER=y\n")
+if "olddefconfig" in args and "FINAL_SECCOMP_CONFIG" in os.environ:
+    config = out / ".config"
+    lines = [line for line in config.read_text().splitlines(keepends=True)
+             if not line.startswith(("CONFIG_SECCOMP=", "CONFIG_SECCOMP_FILTER=",
+                                     "# CONFIG_SECCOMP ", "# CONFIG_SECCOMP_FILTER "))]
+    config.write_text("".join(lines) + os.environ["FINAL_SECCOMP_CONFIG"])
 boot = out / "arch/arm64/boot"
 if "dtbo.img" in args:
     dts = boot / "dts/vendor/qcom"
@@ -127,7 +135,8 @@ class BuildScriptsTest(unittest.TestCase):
         configs = {
             "vendor/kona-perf_defconfig": "CONFIG_BASE=y\n",
             "vendor/samsung/kona-sec-common.config": "CONFIG_COMMON=y\n",
-            "vendor/samsung/r8q.config": "CONFIG_SEC_R8Q_PROJECT=y\n",
+            "vendor/samsung/r8q.config": "CONFIG_SEC_R8Q_PROJECT=y\n" + SECCOMP_CONFIG,
+            "vendor/samsung/x1q.config": "CONFIG_SEC_X1Q_PROJECT=y\n",
             "vendor/not/localversion.config": 'CONFIG_LOCALVERSION="-not"\n',
             "vendor/not/ksu.config": (
                 "CONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n"
@@ -237,6 +246,28 @@ class BuildScriptsTest(unittest.TestCase):
                            "Image", "ksu")
         self.check_success(self.run_build(script="build.sh", extra={
             "DEVICE": "r8q", "BUILD_VARIANT": "stock"}), "Image", "stock")
+
+    def test_r8q_requires_seccomp_and_filter_before_compile(self):
+        for variant in ("stock", "ksu", "ksu+permissive"):
+            for config, missing in (
+                ("", "SECCOMP"),
+                ("CONFIG_SECCOMP=y\n", "SECCOMP_FILTER"),
+                ("CONFIG_SECCOMP_FILTER=y\n", "SECCOMP"),
+            ):
+                with self.subTest(variant=variant, config=config):
+                    self.assert_failure(self.run_build(variant, extra={
+                        "FINAL_SECCOMP_CONFIG": config}),
+                        "missing CONFIG_" + missing + "=y")
+                    calls = (self.root / "make.jsonl").read_text()
+                    self.assertNotIn("dtbo.img", calls)
+                    self.assertNotIn("Image.gz", calls)
+
+    def test_other_devices_do_not_require_r8q_seccomp_gate(self):
+        archive = self.check_success(self.run_build(args=["x1q", "stock"]),
+                                     "Image.gz", "stock")
+        config = Path(str(archive) + ".config").read_text()
+        self.assertNotIn("CONFIG_SECCOMP=y", config)
+        self.assertNotIn("CONFIG_SECCOMP_FILTER=y", config)
 
     def test_ufs_profiles_and_return_to_default(self):
         for mhz in ("333", "300"):
