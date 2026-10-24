@@ -709,8 +709,8 @@ static ssize_t store_##file_name					\
 	int ret;							\
 									\
 	ret = kstrtouint(buf, 0, &param.object);			\
-	if (ret != 1)							\
-		return -EINVAL;						\
+	if (ret)							\
+		return ret;						\
 									\
 	return count;							\
 }
@@ -793,10 +793,10 @@ static ssize_t store_ltl_divider(struct kobject *a, struct kobj_attribute *b,
 	int ret;
 
 	ret = kstrtouint(buf, 0, &input);
-	if (ret != 1)
-		return -EINVAL;
+	if (ret)
+		return ret;
 
-	if (input >= MAX_ATTRIBUTE_NUM)
+	if (!input || input >= MAX_ATTRIBUTE_NUM)
 		return -EINVAL;
 
 	param.ltl_divider = input;
@@ -811,6 +811,9 @@ static ssize_t store_hmp_boost_type(struct kobject *a, struct kobj_attribute *b,
 	int ret;
 
 	ret = kstrtouint(buf, 0, &input);
+	if (ret)
+		return ret;
+
 	param.hmp_boost_type = input;
 
 	return count;
