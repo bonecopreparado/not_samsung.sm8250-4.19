@@ -68,6 +68,7 @@ build_kernel() {
     local jobs=${JOBS:-$(nproc)} source_sha dirty=false ufs_axi=${UFS_AXI_MHZ:-300}
     local out="$PWD/out" boot dts dtb ak3 zipname toolchain_version ak3_sha
     local root_provider=none susfs_version=disabled package_variant=$variant
+    local perf_profile=${R8Q_PERF_PROFILE:-balanced} profile_suffix=
     local -a configs make_args dtbs submodules
     for model in "${VALID_MODELS[@]}"; do
         [[ "$device" != "$model" ]] || valid=true
@@ -77,6 +78,12 @@ build_kernel() {
         300) ;;
         333) [[ "$device" == r8q ]] || die 'UFS_AXI_MHZ=333 is only supported for r8q.' ;;
         *) die 'UFS_AXI_MHZ must be 300 or 333.' ;;
+    esac
+    case "$perf_profile" in
+        balanced) ;;
+        burst) [[ "$device" == r8q ]] || die 'R8Q_PERF_PROFILE=burst is only supported for r8q.'
+            profile_suffix=-burst ;;
+        *) die 'R8Q_PERF_PROFILE must be balanced or burst.' ;;
     esac
     [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || die 'JOBS must be a positive integer.'
     [[ -z "${AK3_COMMIT:-}" || "$AK3_COMMIT" =~ ^[[:xdigit:]]{40}$ ]] ||
@@ -96,6 +103,9 @@ build_kernel() {
         configs+=(vendor/not/ufs-333.config)
     else
         configs+=(vendor/not/ufs-default.config)
+    fi
+    if [[ "$device" == r8q ]]; then
+        configs+=("vendor/not/r8q-$perf_profile.config")
     fi
     for fragment in "${configs[@]}"; do
         [[ -f "arch/arm64/configs/$fragment" ]] || die "Missing config: $fragment"
@@ -156,6 +166,14 @@ build_kernel() {
                 die "The final r8q configuration is missing CONFIG_$option=y; Android media services require seccomp."
         done
     fi
+    if [[ "$perf_profile" == burst ]]; then
+        for option in CPU_EVENT_BOOST INPUT_BOOST_TO_MAX; do
+            grep -Fxq "CONFIG_$option=y" "$out/.config" ||
+                die "The final configuration is missing requested burst option CONFIG_$option=y."
+        done
+        grep -Fxq 'CONFIG_INPUT_BOOST_DURATION_MS=80' "$out/.config" ||
+            die 'The final configuration did not select the 80ms burst profile.'
+    fi
 
     if [[ "$ufs_axi" == 333 ]]; then
         grep -Fxq 'CONFIG_R8Q_UFS_AXI_333MHZ=y' "$out/.config" ||
@@ -209,11 +227,14 @@ build_kernel() {
     ak3_sha=$(git -C "$ak3" rev-parse HEAD)
     [[ -s "$ak3/anykernel.sh" && -s "$ak3/tools/ak3-core.sh" &&
        -s "$ak3/META-INF/com/google/android/update-binary" ]] || die 'Incomplete AnyKernel3 template.'
+    if [[ "$device" == r8q ]]; then
+        python3 scripts/prepare-r8q-anykernel.py "$ak3"
+    fi
     rm -f -- "$ak3"/Image* "$ak3/dtb" "$ak3/dtbo.img"
     cp -- "$boot/$image" "$boot/dtb" "$boot/dtbo.img" "$ak3/"
 
     # Unique filenames preserve prior builds, including retries on the same commit.
-    zipname="not-${package_variant}-ufs${ufs_axi}-$(date -u '+%Y%m%d-%H%M%S')-${source_sha:0:8}-$device-${BUILD_TMP##*.}.zip"
+    zipname="not-${package_variant}-ufs${ufs_axi}${profile_suffix}-$(date -u '+%Y%m%d-%H%M%S')-${source_sha:0:8}-$device-${BUILD_TMP##*.}.zip"
     (cd "$ak3" && zip -qr9 "$BUILD_TMP/$zipname" . \
         -x '.git' '.git/*' '.gitignore' 'README.md' '*placeholder')
     unzip -tq "$BUILD_TMP/$zipname"
@@ -224,6 +245,9 @@ build_kernel() {
         printf 'image=%s\njobs=%s\nplatform_version=%s\nanykernel_commit=%s\n' \
             "$image" "$jobs" "$PLATFORM_VERSION" "$ak3_sha"
         printf 'ufs_axi_profile_mhz=%s\n' "$ufs_axi"
+        if [[ "$device" == r8q ]]; then
+            printf 'r8q_performance_profile=%s\n' "$perf_profile"
+        fi
         printf 'root_provider=%s\nsusfs_version=%s\n' "$root_provider" "$susfs_version"
         printf '\nNoMount patch hashes:\n'
         sha256sum patches/nomount/*.patch
@@ -239,6 +263,10 @@ build_kernel() {
         fi
         printf '\nSubmodules:\n'
         git submodule status --recursive -- "${submodules[@]}"
+        if [[ "$device" == r8q ]]; then
+            printf '\nAnyKernel local overlay hashes:\n'
+            (cd "$ak3" && sha256sum tools/r8q-devicecheck.sh META-INF/com/google/android/update-binary)
+        fi
         printf '\nBuild artifact hashes:\n'
         (cd "$boot" && sha256sum "$image" dtb dtbo.img)
     } > "$BUILD_TMP/$zipname.build-info.txt"

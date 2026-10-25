@@ -54,6 +54,10 @@ static unsigned int get_input_boost_freq(struct cpufreq_policy *policy)
 {
 	unsigned int freq;
 
+	/* Opt-in touch bursts follow the current policy/thermal ceiling. */
+	if (IS_ENABLED(CONFIG_INPUT_BOOST_TO_MAX))
+		return policy->max;
+
 	if (cpumask_test_cpu(policy->cpu, cpu_lp_mask))
 		freq = CONFIG_INPUT_BOOST_FREQ_LP;
 	else if (cpumask_test_cpu(policy->cpu, cpu_perf_mask))

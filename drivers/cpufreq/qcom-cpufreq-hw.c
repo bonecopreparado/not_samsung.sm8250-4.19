@@ -516,12 +516,26 @@ static bool of_find_freq(u32 *of_table, int of_len, long frequency)
 	return false;
 }
 
+static unsigned int
+qcom_cpufreq_hw_max_non_boost(struct cpufreq_frequency_table *table)
+{
+	struct cpufreq_frequency_table *pos;
+	unsigned int max_freq = 0;
+
+	cpufreq_for_each_valid_entry(pos, table) {
+		if (!(pos->flags & CPUFREQ_BOOST_FREQ))
+			max_freq = max(max_freq, pos->frequency);
+	}
+
+	return max_freq;
+}
+
 static int qcom_cpufreq_hw_read_lut(struct platform_device *pdev,
 				    struct cpufreq_qcom *c, u32 max_cores,
 				    int domain_index)
 {
 	struct device *dev = &pdev->dev, *cpu_dev;
-	u32 data, src, lval, i, j, core_count, prev_cc, prev_freq, freq, volt;
+	u32 data, src, lval, i, core_count, prev_cc, prev_freq, freq, volt;
 	u32 max_cc = 0;
 	unsigned long cpu;
 	int ret, of_len;
@@ -615,12 +629,8 @@ static int qcom_cpufreq_hw_read_lut(struct platform_device *pdev,
 
 	c->table[i].frequency = CPUFREQ_TABLE_END;
 
-	/* Record the highest non-boost frequency for thermal pressure gating. */
-	for (j = 0; j < lut_max_entries && c->table[j].frequency != CPUFREQ_TABLE_END; j++) {
-		if (c->table[j].flags == CPUFREQ_BOOST_FREQ)
-			break;
-		c->last_non_boost_freq = c->table[j].frequency;
-	}
+	/* DT filtering may leave invalid rows between or after valid entries. */
+	c->last_non_boost_freq = qcom_cpufreq_hw_max_non_boost(c->table);
 
 	for_each_cpu(cpu, &c->related_cpus) {
 		per_cpu(cpufreq_boost_pcpu, cpu).c = c;

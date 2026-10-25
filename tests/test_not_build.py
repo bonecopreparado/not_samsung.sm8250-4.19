@@ -61,7 +61,7 @@ for target in ("Image", "Image.gz"):
 '''
 
 FAKE_GIT = r'''#!/usr/bin/env python3
-import os, pathlib, sys
+import os, pathlib, shutil, sys
 args = sys.argv[1:]
 if args[0] == "submodule":
     with open(os.environ["GIT_LOG"], "a") as log:
@@ -88,6 +88,8 @@ elif args[0] == "clone":
         path = dest / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("template fixture")
+    for name in ("anykernel.sh", "META-INF/com/google/android/update-binary"):
+        shutil.copyfile(pathlib.Path(os.environ["AK3_FIXTURE"]) / name, dest / name)
     if os.environ.get("BAD_TEMPLATE"):
         (dest / "tools/ak3-core.sh").unlink()
 elif args[0] == "-C":
@@ -114,7 +116,8 @@ class BuildScriptsTest(unittest.TestCase):
         self.root = Path(self.temp.name) / "kernel"
         self.root.mkdir()
         for name in ("build.sh", "build-local.sh", "scripts/not-build-common.sh",
-                     "scripts/prepare-nomount.sh", "scripts/prepare-sukisu.sh"):
+                     "scripts/prepare-nomount.sh", "scripts/prepare-sukisu.sh",
+                     "scripts/prepare-r8q-anykernel.py", "scripts/anykernel/r8q-devicecheck.sh"):
             dest = self.root / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, dest)
@@ -144,6 +147,8 @@ class BuildScriptsTest(unittest.TestCase):
             "vendor/not/permissive.config": "CONFIG_SECURITY_SELINUX_PERMISSIVE=y\n",
             "vendor/not/ufs-333.config": "CONFIG_R8Q_UFS_AXI_333MHZ=y\n",
             "vendor/not/ufs-default.config": "# CONFIG_R8Q_UFS_AXI_333MHZ is not set\n",
+            "vendor/not/r8q-balanced.config": "# CONFIG_INPUT_BOOST_TO_MAX is not set\nCONFIG_INPUT_BOOST_DURATION_MS=300\n",
+            "vendor/not/r8q-burst.config": "CONFIG_CPU_EVENT_BOOST=y\nCONFIG_INPUT_BOOST_TO_MAX=y\nCONFIG_INPUT_BOOST_DURATION_MS=80\n",
         }
         for path, text in configs.items():
             dest = self.root / "arch/arm64/configs" / path
@@ -151,11 +156,12 @@ class BuildScriptsTest(unittest.TestCase):
             dest.write_text(text)
         self.env = os.environ.copy()
         for name in ("DEVICE", "BUILD_VARIANT", "TC_DIR", "JOBS", "CLANG_URL",
-                     "CLANG_SHA256", "AK3_COMMIT", "PLATFORM_VERSION", "UFS_AXI_MHZ"):
+                     "CLANG_SHA256", "AK3_COMMIT", "PLATFORM_VERSION", "UFS_AXI_MHZ", "R8Q_PERF_PROFILE"):
             self.env.pop(name, None)
         self.env.update(PATH=str(self.bin) + os.pathsep + self.env["PATH"],
                         JOBS="2", MAKE_LOG=str(self.root / "make.jsonl"),
-                        GIT_LOG=str(self.root / "git.log"))
+                        GIT_LOG=str(self.root / "git.log"),
+                        AK3_FIXTURE=str(ROOT / "tests/fixtures/ak3-r8q"))
         for source in ("drivers/kernelsu", "security/baseband-guard", "fs/nomount"):
             for name in ("Kconfig", "Makefile"):
                 path = self.root / source / name
@@ -280,6 +286,35 @@ class BuildScriptsTest(unittest.TestCase):
                 info = Path(str(archive) + ".build-info.txt").read_text()
                 self.assertIn("ufs_axi_profile_mhz=" + mhz, info)
                 self.assertIn("NoMount patch hashes:", info)
+
+    def test_r8q_hardware_fallback_is_packaged(self):
+        archive = self.check_success(self.run_build(), "Image.gz", "stock")
+        with zipfile.ZipFile(archive) as package:
+            self.assertIn(b'NotKernel r8q hardware fallback v1',
+                          package.read('META-INF/com/google/android/update-binary'))
+            self.assertIn(b'do.devicecheck=1', package.read('anykernel.sh'))
+            helper = package.read('tools/r8q-devicecheck.sh')
+        info = Path(str(archive) + '.build-info.txt').read_text()
+        self.assertIn(hashlib.sha256(helper).hexdigest() + '  tools/r8q-devicecheck.sh', info)
+
+    def test_burst_profile_and_return_to_balanced(self):
+        for profile, duration in (('burst', 80), ('balanced', 300)):
+            archive = self.check_success(self.run_build(extra={'R8Q_PERF_PROFILE': profile}),
+                                         'Image.gz', 'stock')
+            config = Path(str(archive) + '.config').read_text()
+            self.assertEqual('CONFIG_INPUT_BOOST_TO_MAX=y' in config, profile == 'burst')
+            self.assertIn('CONFIG_INPUT_BOOST_DURATION_MS=' + str(duration), config)
+            self.assertEqual('-ufs300-burst-' in archive.name, profile == 'burst')
+            self.assertIn('r8q_performance_profile=' + profile,
+                          Path(str(archive) + '.build-info.txt').read_text())
+
+    def test_burst_rejects_invalid_profile_device_and_final_config(self):
+        self.assert_failure(self.run_build(extra={'R8Q_PERF_PROFILE': 'unknown'}),
+                            'R8Q_PERF_PROFILE must be')
+        self.assert_failure(self.run_build(extra={'R8Q_PERF_PROFILE': 'burst'},
+                                          args=['x1q', 'stock']), 'only supported for r8q')
+        self.assert_failure(self.run_build(extra={'R8Q_PERF_PROFILE': 'burst',
+            'FINAL_KSU_CONFIG': '# CONFIG_KSU is not set\n'}), 'missing requested burst option')
 
     def test_ufs_rejects_invalid_device_rate_and_resolved_config(self):
         self.assert_failure(self.run_build(extra={"UFS_AXI_MHZ": "334"}),
