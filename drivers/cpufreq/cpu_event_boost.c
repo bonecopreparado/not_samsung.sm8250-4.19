@@ -11,6 +11,7 @@
 #include <linux/kthread.h>
 #include <linux/msm_drm_notify.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/version.h>
 #include <drm/drm_panel.h>
 
@@ -31,7 +32,9 @@ struct boost_drv {
 	struct notifier_block cpu_notif;
 	struct notifier_block msm_drm_notif;
 	wait_queue_head_t boost_waitq;
-	atomic_long_t max_boost_expires;
+	spinlock_t boost_lock;
+	unsigned long input_boost_expires;
+	unsigned long max_boost_expires;
 	unsigned long state;
 };
 
@@ -43,7 +46,8 @@ static struct boost_drv boost_drv_g __read_mostly = {
 						    input_unboost_worker, 0),
 	.max_unboost = __DELAYED_WORK_INITIALIZER(boost_drv_g.max_unboost,
 						  max_unboost_worker, 0),
-	.boost_waitq = __WAIT_QUEUE_HEAD_INITIALIZER(boost_drv_g.boost_waitq)
+	.boost_waitq = __WAIT_QUEUE_HEAD_INITIALIZER(boost_drv_g.boost_waitq),
+	.boost_lock = __SPIN_LOCK_UNLOCKED(boost_drv_g.boost_lock)
 };
 
 static unsigned int get_input_boost_freq(struct cpufreq_policy *policy)
@@ -89,12 +93,21 @@ static void update_online_cpu_policy(void)
 
 static void __cpu_input_boost_kick(struct boost_drv *b)
 {
-	if (test_bit(SCREEN_OFF, &b->state))
+	unsigned long boost_jiffies =
+		msecs_to_jiffies(CONFIG_INPUT_BOOST_DURATION_MS);
+	unsigned long flags;
+	bool changed;
+
+	if (!boost_jiffies || test_bit(SCREEN_OFF, &b->state))
 		return;
 
-	set_bit(INPUT_BOOST, &b->state);
-	if (!mod_delayed_work(system_unbound_wq, &b->input_unboost,
-			      msecs_to_jiffies(CONFIG_INPUT_BOOST_DURATION_MS)))
+	spin_lock_irqsave(&b->boost_lock, flags);
+	b->input_boost_expires = jiffies + boost_jiffies;
+	changed = !test_and_set_bit(INPUT_BOOST, &b->state);
+	spin_unlock_irqrestore(&b->boost_lock, flags);
+
+	mod_delayed_work(system_unbound_wq, &b->input_unboost, boost_jiffies);
+	if (changed)
 		wake_up(&b->boost_waitq);
 }
 
@@ -109,24 +122,26 @@ static void __cpu_event_boost_kick_max(struct boost_drv *b,
 				       unsigned int duration_ms)
 {
 	unsigned long boost_jiffies = msecs_to_jiffies(duration_ms);
-	unsigned long curr_expires, new_expires;
+	unsigned long flags, new_expires;
+	bool changed;
 
-	if (test_bit(SCREEN_OFF, &b->state))
+	if (!boost_jiffies || test_bit(SCREEN_OFF, &b->state))
 		return;
 
-	do {
-		curr_expires = atomic_long_read(&b->max_boost_expires);
-		new_expires = jiffies + boost_jiffies;
+	spin_lock_irqsave(&b->boost_lock, flags);
+	new_expires = jiffies + boost_jiffies;
+	/* Skip this boost if there's a longer boost in effect. */
+	if (test_bit(MAX_BOOST, &b->state) &&
+	    time_after(b->max_boost_expires, new_expires)) {
+		spin_unlock_irqrestore(&b->boost_lock, flags);
+		return;
+	}
+	b->max_boost_expires = new_expires;
+	changed = !test_and_set_bit(MAX_BOOST, &b->state);
+	spin_unlock_irqrestore(&b->boost_lock, flags);
 
-		/* Skip this boost if there's a longer boost in effect */
-		if (time_after(curr_expires, new_expires))
-			return;
-	} while (atomic_long_cmpxchg(&b->max_boost_expires, curr_expires,
-				     new_expires) != curr_expires);
-
-	set_bit(MAX_BOOST, &b->state);
-	if (!mod_delayed_work(system_unbound_wq, &b->max_unboost,
-			      boost_jiffies))
+	mod_delayed_work(system_unbound_wq, &b->max_unboost, boost_jiffies);
+	if (changed)
 		wake_up(&b->boost_waitq);
 }
 
@@ -137,13 +152,35 @@ void cpu_event_boost_kick_max(unsigned int duration_ms)
 	__cpu_event_boost_kick_max(b, duration_ms);
 }
 
+static void cpu_boost_unboost(struct boost_drv *b, struct delayed_work *work,
+			      unsigned long *expires, int bit)
+{
+	unsigned long flags, now, remaining = 0;
+	bool changed = false;
+
+	/* A running callback may belong to an older, extended boost. */
+	spin_lock_irqsave(&b->boost_lock, flags);
+	now = jiffies;
+	if (time_after(*expires, now))
+		remaining = *expires - now;
+	else
+		changed = test_and_clear_bit(bit, &b->state);
+	spin_unlock_irqrestore(&b->boost_lock, flags);
+
+	/* Never wait on workqueue state while holding boost_lock. */
+	if (remaining)
+		mod_delayed_work(system_unbound_wq, work, remaining);
+	if (changed)
+		wake_up(&b->boost_waitq);
+}
+
 static void input_unboost_worker(struct work_struct *work)
 {
 	struct boost_drv *b = container_of(to_delayed_work(work),
 					   typeof(*b), input_unboost);
 
-	clear_bit(INPUT_BOOST, &b->state);
-	wake_up(&b->boost_waitq);
+	cpu_boost_unboost(b, &b->input_unboost, &b->input_boost_expires,
+			  INPUT_BOOST);
 }
 
 static void max_unboost_worker(struct work_struct *work)
@@ -151,8 +188,7 @@ static void max_unboost_worker(struct work_struct *work)
 	struct boost_drv *b = container_of(to_delayed_work(work),
 					   typeof(*b), max_unboost);
 
-	clear_bit(MAX_BOOST, &b->state);
-	wake_up(&b->boost_waitq);
+	cpu_boost_unboost(b, &b->max_unboost, &b->max_boost_expires, MAX_BOOST);
 }
 
 static int cpu_boost_thread(void *data)
@@ -233,8 +269,8 @@ static int msm_drm_notifier_cb(struct notifier_block *nb, unsigned long action,
 		__cpu_event_boost_kick_max(b, CONFIG_WAKE_BOOST_DURATION_MS);
 	} else {
 		set_bit(SCREEN_OFF, &b->state);
-		wake_up(&b->boost_waitq);
 	}
+	wake_up(&b->boost_waitq);
 
 	return NOTIFY_OK;
 }

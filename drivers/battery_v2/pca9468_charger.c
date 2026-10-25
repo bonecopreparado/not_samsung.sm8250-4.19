@@ -2022,6 +2022,8 @@ static int pca9468_check_error(struct pca9468_charger *pca9468)
 			/* Check temperature regulation loop */
 			/* Read INT1_STS register */
 			ret = pca9468_read_reg(pca9468, PCA9468_REG_INT1_STS, &reg_val);
+			if (ret < 0)
+				goto error;
 			if (reg_val & PCA9468_BIT_TEMP_REG_STS) {
 				/* Over temperature protection */
 				pr_err("%s: Device is in temperature regulation", __func__);
@@ -2217,7 +2219,10 @@ error:
 		pca9468->health_status = POWER_SUPPLY_HEALTH_DC_ERR;
 	}
 #endif
-	pr_info("%s: Active Status=%d\n", __func__, ret);
+	if (ret)
+		pr_info("%s: Active Status=%d\n", __func__, ret);
+	else
+		pr_debug("%s: Active Status=%d\n", __func__, ret);
 	return ret;
 }
 
@@ -2261,7 +2266,10 @@ static int pca9468_check_ccmode_status(struct pca9468_charger *pca9468)
 #endif
 
 error:
-	pr_info("%s: CCMODE Status=%d\n", __func__, ret);
+	if (ret < 0)
+		pr_info("%s: CCMODE Status=%d\n", __func__, ret);
+	else
+		pr_debug("%s: CCMODE Status=%d\n", __func__, ret);
 	return ret;
 }
 
@@ -2612,7 +2620,7 @@ static int pca9468_charge_ccmode(struct pca9468_charger *pca9468)
 	int ccmode;
 	int vin_vol, iin;
 
-	pr_info("%s: ======START=======\n", __func__);
+	pr_debug("%s: ======START=======\n", __func__);
 
 #if defined(CONFIG_BATTERY_SAMSUNG)
 	pca9468_set_charging_state(pca9468, DC_STATE_CC_MODE);
@@ -2732,7 +2740,10 @@ static int pca9468_charge_ccmode(struct pca9468_charger *pca9468)
 		}
 	}
 error:
-	pr_info("%s: End, ret=%d\n", __func__, ret);
+	if (ret)
+		pr_info("%s: End, ret=%d\n", __func__, ret);
+	else
+		pr_debug("%s: End, ret=%d\n", __func__, ret);
 	return ret;
 }
 
@@ -3656,10 +3667,10 @@ static void pca9468_timer_work(struct work_struct *work)
 #ifdef CONFIG_RTC_HCTOSYS
 	get_current_time(&pca9468->last_update_time);
 
-	pr_info("%s: timer id=%d, charging_state=%d, last_update_time=%lu\n",
+	pr_debug("%s: timer id=%d, charging_state=%d, last_update_time=%lu\n",
 		__func__, pca9468->timer_id, pca9468->charging_state, pca9468->last_update_time);
 #else
-	pr_info("%s: timer id=%d, charging_state=%d\n",
+	pr_debug("%s: timer id=%d, charging_state=%d\n",
 		__func__, pca9468->timer_id, pca9468->charging_state);
 #endif
 
