@@ -6649,8 +6649,8 @@ restart:
 
 	if (!sc.nr_reclaimed) {
 		count_vm_event(LRU_KSWAPD_NO_PROGRESS);
-		if (!lru_gen_enabled())
-			pgdat->kswapd_failures++;
+		/* MGLRU must also stop retrying nodes that make no progress. */
+		pgdat->kswapd_failures++;
 	}
 
 out:
