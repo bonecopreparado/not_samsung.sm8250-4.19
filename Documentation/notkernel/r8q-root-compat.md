@@ -1,92 +1,89 @@
-# r8q 4.19: alinhar Manager e daemon SukiSU
+# r8q: reparar a combinacao Manager/daemon
 
-O kernel `97f30708` deu boot. A captura e o bugreport mostram Manager
-4.2.1-r2, `KernelSU: -1`, modo de visualizacao e um daemon de 5.126.856 bytes.
-Essa combinacao nao corresponde ao SukiSU 4.1.2 integrado nesta arvore.
-O kernel espera GET_INFO `0x80004b02`; os logs registram pedidos
-`0x80104b02`, que sao rejeitados. Isso impede uma sessao normal de gerenciamento.
+O c78ae92e iniciou. Nao e necessario recompilar para este reparo de userspace.
 
-Este pacote usa somente o Manager e o daemon ARM64 oficiais **v4.1.2 / 40545**,
-com SHA-256 conferido. Nao grava boot/dtbo, nao troca o kernel, nao apaga perfis
-e nao remove/desativa modulos. Nao e um modulo instalavel nem ZIP para flash.
-Extraia o conteudo; o script e executado em um terminal Android com root.
+## Diagnostico de 25/10, 20:50
 
-## Primeiro: corrigir o Manager
+O bugreport registra Manager SukiSU 4.2.1-r2/41084 e KernelSU=-1. O daemon se
+identifica como KernelSU Next e registra "UAPI version mismatch: kernel=0,
+ksud=6", pulando PostFsData, Services e BootCompleted. Os eventos de boot
+dos modulos nao foram executados normalmente.
 
-Instale `SukiSU_v4.1.2_40545-release.apk`. Se o Android rejeitar o downgrade,
-remova **somente o aplicativo Manager** pelas Configuracoes do Android e
-instale esse APK. Nao use a funcao "Uninstall" do root no aplicativo: a rotina
-upstream pode remover modulos e restaurar boot.
+O app KernelSU Next foi desinstalado as 20:49:15, mas o daemon de 7.517.352
+bytes permaneceu em /data/adb/ksud. As 20:49:28 o instalador registra SukiSU
+4.2.1-r2/41084. Nesse trecho nao aparece uma instalacao 40545 seguida de
+atualizacao automatica; nao se conclui por que o usuario viu outra versao voltar.
+NoMount ainda e 2.2.0/605, protocolo 22; o driver deste kernel usa 20.
 
-Abra o Manager 4.1.2 e confira se reconhece o kernel. O proprio Manager so
-atualiza o daemon automaticamente quando ja reconhece a interface e o app como
-Manager. Apenas instalar o APK nao comprova que o daemon foi substituido.
+O APK incluido foi verificado pelo AndroidManifest.xml binario:
+com.sukisu.ultra, versionName=v4.1.2, versionCode=40545. O SHA-256 corresponde
+ao asset oficial. O nome do arquivo nao foi a unica evidencia usada.
+Nenhum log bruto do usuario foi publicado.
 
-## Diagnosticar e reparar daemon/assets
+## 1. Instalar o APK exato
 
-Copie a pasta extraida para Download no celular. Em um terminal com root:
+Use o [link direto 4.1.2/40545](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/download/v4.1.2/SukiSU_v4.1.2_40545-release.apk)
+ou SukiSU_v4.1.2_40545-release.apk incluido aqui. No PC foi fornecida uma
+copia identica chamada INSTALE-SukiSU-4.1.2-40545.apk.
+
+Se o Android recusar o downgrade, remova somente o aplicativo SukiSU Manager
+pelas Configuracoes do Android e instale o APK exato. A funcao de desinstalar
+o root dentro do Manager nao e esse procedimento: pode remover modulos e
+restaurar boot. O helper nao desinstala apps nem modifica seus dados.
+
+Abra e confira v4.1.2 / 40545. Nao aceite uma atualizacao para 4.2.1 enquanto
+usar esta integracao. O app KernelSU Next ja foi removido nos logs; remover
+o aplicativo sozinho nao restaura o daemon.
+
+## 2. Reparar daemon/assets com backup
+
+Extraia o pacote completo. E um ZIP de arquivos de userspace, nao um modulo
+ou ZIP para flash. Em um terminal Android com root funcional:
 
 ```sh
 su
-cd /sdcard/Download/r8q-SukiSU-4.1.2-reparo
+cd /sdcard/Download/r8q-SukiSU-4.1.2-reparo-v2
 sh r8q-sukisu-repair.sh --check
-```
-
-O modo `--check` apenas le metadados e hashes. Para aplicar o reparo:
-
-```sh
 sh r8q-sukisu-repair.sh --repair
 ```
 
-O reparo exige Android iniciado, modelo de bootloader r8q, kernel 4.19 e
-resposta de versao **40545** consultada com o daemon verificado. Em seguida
-salva backup do daemon e dos assets de `ksu/bin`, executa o `install` oficial
-e confere o hash instalado. Falha de instalacao/hash aciona rollback. Os backups
-e o staging ficam preservados; nao ha limpeza automatica dos dados de root.
+Adapte o cd a pasta do descompactador. O check so le metadados e hashes;
+nao executa o daemon instalado.
 
-Reinicie manualmente depois de o Manager reconhecer o kernel. Se necessario,
-o comando de rollback com o identificador do backup e exibido pelo script.
-O auxiliar precisa de root ja funcional; ele nao cria root a partir de um app
-sem permissao, e sua execucao no aparelho ainda precisa ser validada.
+O reparo v2 verifica a versao e o hash do APK realmente instalado antes de
+qualquer staging/backup. Se ainda detectar 41084, para sem substituir daemon.
+Tambem verifica os arquivos fornecidos, exige resposta 40545 do kernel por
+meio do daemon verificado e salva backup de daemon/assets. Depois executa
+o install oficial e confere o hash instalado. Falha de instalacao/hash aciona
+rollback. Modulos e perfis nao sao apagados.
 
-## LSPosed e modulos
+O comando de rollback com ID aparece no final. Staging, logs e backups sao
+preservados. Nao ha reboot automatico, escrita de boot/dtbo ou troca de apps.
 
-O bugreport ja tem ReZygisk 1.0.0/552 e LSPosed 2.2.1/7933. A descricao verde
-de um modulo pode estar persistida; `zygisk_running=false` e a ausencia de
-processos zygiskd/lspd no snapshot indicam que nao basta considerar o modulo
-"habilitado". Primeiro alinhe Manager/daemon; depois verifique novamente o
-estado do provedor Zygisk e o erro completo da instalacao do modulo.
+Parsing POSIX e quatro testes de versao/hash instalado passaram no host,
+com PackageManager Android simulado. A execucao completa ainda precisa ser
+validada no aparelho. Instalar so o APK nao comprova troca do daemon.
 
-Use **um provedor Zygisk por vez** e uma implementacao LSPosed compativel com
-Android 16. O projeto JingMatrix foi renomeado para Vector e sua documentacao
-declara suporte Android 8.1--17 Beta. Isso nao significa que seja necessario
-trocar a implementacao LSPosed ja instalada para corrigir o problema de root.
-Nao instalamos nem redistribuimos modulos de terceiros neste pacote.
+## 3. Alinhar NoMount e reiniciar
 
-O bugreport tambem mostra **NoMount 2.2.0/605**, que usa protocolo **22**,
-enquanto o driver desta arvore declara **20**. As notas oficiais do 2.2.0
-confirmam mudanca no tamanho das mensagens e exigem atualizar driver e
-metamodulo juntos. Esse par e incompativel, independentemente do Manager.
+Depois de o Manager reconhecer o kernel e o reparo concluir, preserve a
+configuracao do metamodulo e instale pelo Manager o
+[NoMount 2.0.0 oficial](https://github.com/maxsteeel/nomount/releases/download/v2.0.0/NoMount-v2.0.0-release.zip).
+Ele usa protocolo 20, correspondente ao driver. O 2.2.0 usa outro tamanho
+de mensagem/protocolo e nao e um par compativel.
 
-Para este kernel, depois de corrigir Manager/daemon, instale pelo Manager o
-[NoMount v2.0.0 oficial](https://github.com/maxsteeel/nomount/releases/tag/v2.0.0),
-que usa protocolo **20**, e reinicie. Preserve a configuracao do metamodulo
-antes da troca. Nao tente carregar os LKMs GKI do 2.2.0 neste kernel 4.19 nem
-mudar apenas a string de versao do driver. O helper nao troca modulos.
-A troca de metamodulo e o funcionamento final do LSPosed ainda exigem teste
-no aparelho; o bugreport nao inclui o erro completo de cada instalacao.
+Reinicie manualmente apos alinhar os componentes para repetir os eventos
+de boot com o daemon correto. Verifique ReZygisk e LSPosed de novo.
+Descricao verde de modulo nao comprova execucao; o bugreport atual tem
+zygisk_running=false. O funcionamento final depende desse teste.
 
-## Fontes e hashes
+## Origem e hashes
 
-- [Release oficial 4.1.2](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/tag/v4.1.2)
-- APK SHA-256: `b0d75e28ef40b5e143c598f34c8f579f7daa1dfdff9c03940ea7eb215dbbc917`
-- Daemon ARM64 SHA-256: `edbb762c0b28e426930b04202cb46d857e84bc9171448567ed6beb768fb57a76`
-- [Interface do kernel fixado](https://github.com/SukiSU-Ultra/SukiSU-Ultra/blob/624727d1077f5afea894f066bcb8ca70079cf802/kernel/include/uapi/supercall.h#L184)
-- [Instalacao oficial do daemon/assets](https://github.com/SukiSU-Ultra/SukiSU-Ultra/blob/v4.1.2/userspace/ksud/src/utils.rs#L189)
-- [Vector e requisitos de Zygisk](https://github.com/JingMatrix/Vector/blob/v2.2/README.md)
-- [Requisitos do ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext/blob/master/README.md)
-- [Mudanca de protocolo no NoMount 2.2.0](https://github.com/maxsteeel/nomount/releases/tag/v2.2.0)
+Binarios oficiais inalterados do [SukiSU 4.1.2](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/tag/v4.1.2).
+Fonte upstream e licenca incluidos; helper e instrucoes sao locais.
 
-O ZygiskNext atual proibe redistribuicao; use o release oficial se decidir
-utiliza-lo. Este reparo nao falsifica GKI, nao adiciona uma ABI de outro
-SukiSU ao kernel e nao declara LSPosed corrigido sem novo teste no aparelho.
+- APK: b0d75e28ef40b5e143c598f34c8f579f7daa1dfdff9c03940ea7eb215dbbc917
+- Daemon ARM64: edbb762c0b28e426930b04202cb46d857e84bc9171448567ed6beb768fb57a76
+
+O relato demonstra mistura de componentes. Nao demonstra que o arquivo
+40545 fornecido se converteu em 41084, nem exige falsificar suporte GKI.

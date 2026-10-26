@@ -8,6 +8,7 @@ DAEMON_SHA=edbb762c0b28e426930b04202cb46d857e84bc9171448567ed6beb768fb57a76
 APK_SHA=b0d75e28ef40b5e143c598f34c8f579f7daa1dfdff9c03940ea7eb215dbbc917
 APK_NAME=SukiSU_v4.1.2_40545-release.apk
 EXPECTED_KERNEL_VERSION=40545
+EXPECTED_MANAGER_VERSION=40545
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 1
 MODE=${1:---check}
 DAEMON=/data/adb/ksud
@@ -18,6 +19,18 @@ LOCK=/data/adb/.r8q-sukisu-repair-lock
 
 fail() { echo "ERRO: $*" >&2; exit 1; }
 hash_file() { sha256sum "$1" | awk '{print $1}'; }
+check_installed_manager() {
+    local version installed_apk
+    version=$(dumpsys package com.sukisu.ultra 2>/dev/null |
+        awk '$1 ~ /^versionCode=/ {split($1, v, "="); print v[2]; exit}')
+    [ "$version" = "$EXPECTED_MANAGER_VERSION" ] ||
+        fail "Manager instalado: ${version:-ausente}; esperado 40545. Instale o APK 4.1.2 exato. Nenhum daemon foi substituido."
+    installed_apk=$(pm path com.sukisu.ultra 2>/dev/null | sed -n 's/^package://p' | head -n 1)
+    [ -f "$installed_apk" ] || fail "Nao foi possivel conferir o APK efetivamente instalado."
+    [ "$(hash_file "$installed_apk")" = "$APK_SHA" ] ||
+        fail "O APK instalado nao corresponde ao release oficial 4.1.2 verificado. Nenhum daemon foi substituido."
+    echo "Manager instalado conferido: v4.1.2 / 40545, SHA-256 correto."
+}
 acquire_lock() {
     mkdir "$LOCK" 2>/dev/null || fail "Outro reparo pode estar ativo; verifique $LOCK antes de tentar novamente."
     trap 'rmdir "$LOCK" 2>/dev/null || true' 0
@@ -102,9 +115,10 @@ for DIR in /data/adb /data/adb/ksu "$BIN" "$BACKUP_BASE"; do
     [ ! -L "$DIR" ] || fail "Diretorio com link simbolico inesperado: $DIR"
 done
 [ ! -L "$DAEMON" ] || fail "O daemon principal nao pode ser um link simbolico."
-for CMD in sha256sum awk cp chmod chcon mv mkdir rmdir date touch cat sed tr readlink; do
+for CMD in sha256sum awk cp chmod chcon mv mkdir rmdir date touch cat sed tr readlink head pm dumpsys; do
     command -v "$CMD" >/dev/null 2>&1 || fail "Comando ausente: $CMD"
 done
+check_installed_manager
 SOURCE="$SCRIPT_DIR/ksud-aarch64-linux-android"
 [ -f "$SOURCE" ] || fail "Extraia o pacote completo junto com o script."
 [ "$(hash_file "$SOURCE")" = "$DAEMON_SHA" ] || fail "SHA-256 do daemon nao confere."
