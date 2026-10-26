@@ -3814,8 +3814,8 @@ static void walk_mm(struct lruvec *lruvec, struct mm_struct *mm, struct lru_gen_
 			}
 		}
 
-		cond_resched();
 		mem_cgroup_unlock_pages();
+		cond_resched();
 	} while (err == -EAGAIN && walk->next_addr && !mm_is_oom_victim(mm));
 }
 
@@ -6649,8 +6649,8 @@ restart:
 
 	if (!sc.nr_reclaimed) {
 		count_vm_event(LRU_KSWAPD_NO_PROGRESS);
-		if (!lru_gen_enabled())
-			pgdat->kswapd_failures++;
+		/* MGLRU must also stop retrying nodes that make no progress. */
+		pgdat->kswapd_failures++;
 	}
 
 out:

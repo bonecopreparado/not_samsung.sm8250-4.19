@@ -1,0 +1,89 @@
+diff --git a/kernel/src/nomount.c b/kernel/src/nomount.c
+index 5cb5c22..d8cb3a8 100644
+--- a/kernel/src/nomount.c
++++ b/kernel/src/nomount.c
+@@ -1460,7 +1460,7 @@ static void __nomount_clear_all(int clear_flags)
+ 
+ static int nm_process_payload(unsigned long user_addr)
+ {
+-    struct nm_payload *payload;
++    struct nm_payload *payload, *mapped;
+     struct page *page;
+     unsigned long pg_off = offset_in_page(user_addr);
+     char *buf_ptr, *buf_end;
+@@ -1468,15 +1468,25 @@ static int nm_process_payload(unsigned long user_addr)
+     if (pg_off + sizeof(*payload) > PAGE_SIZE || get_user_pages_fast(user_addr, 1, FOLL_WRITE, &page) != 1) 
+         return -EFAULT;
+ 
+-    if ((payload = (void *)((char *)kmap(page) + pg_off))->magic != NOMOUNT_MAGIC_SIG) {
++    mapped = (void *)((char *)kmap(page) + pg_off);
++    /* The caller can still modify the pinned page. Parse a stable snapshot. */
++    payload = kmemdup(mapped, sizeof(*payload), GFP_KERNEL);
++    if (!payload) {
++        /* The key preparse interface reports command errors in this field. */
++        WRITE_ONCE(mapped->status, -ENOMEM);
++        kunmap(page);
++        set_page_dirty_lock(page);
++        put_page(page);
++        return -ENOMEM;
++    }
++    if (payload->magic != NOMOUNT_MAGIC_SIG) {
++        kfree(payload);
+         kunmap(page);
+         put_page(page);
+         return -EFAULT;
+     }
+ 
+     payload->status = 0;
+-    buf_ptr = payload->buffer + payload->arg1;
+-    buf_end = payload->buffer + (payload->data_size > sizeof(payload->buffer) ? sizeof(payload->buffer) : payload->data_size);
+ 
+     switch (payload->cmd) {
+         case NM_CMD_GET_VERSION:
+@@ -1485,7 +1495,12 @@ static int nm_process_payload(unsigned long user_addr)
+ 
+         case NM_CMD_ADD_RULE: {
+             LIST_HEAD(r_victims);
+-            if (payload->data_size > sizeof(payload->buffer)) { payload->status = -EINVAL; break; }
++            if (payload->data_size > sizeof(payload->buffer) || payload->arg1 > payload->data_size) {
++                payload->status = -EINVAL;
++                break;
++            }
++            buf_ptr = payload->buffer + payload->arg1;
++            buf_end = payload->buffer + payload->data_size;
+             while ((size_t)(buf_end - buf_ptr) >= sizeof(struct nm_rule_hdr)) {
+                 struct nm_rule_hdr *h = (void *)buf_ptr;
+                 buf_ptr += sizeof(*h);
+@@ -1505,7 +1520,12 @@ static int nm_process_payload(unsigned long user_addr)
+ 
+         case NM_CMD_DEL_RULE: {
+             LIST_HEAD(r_victims);
+-            if (payload->data_size > sizeof(payload->buffer)) { payload->status = -EINVAL; break; }
++            if (payload->data_size > sizeof(payload->buffer) || payload->arg1 > payload->data_size) {
++                payload->status = -EINVAL;
++                break;
++            }
++            buf_ptr = payload->buffer + payload->arg1;
++            buf_end = payload->buffer + payload->data_size;
+             down_write(&nomount_rwsem);
+             while ((size_t)(buf_end - buf_ptr) >= sizeof(struct nm_del_hdr)) {
+                 struct nm_del_hdr *h = (void *)buf_ptr;
+@@ -1570,7 +1590,8 @@ static int nm_process_payload(unsigned long user_addr)
+ 
+         case NM_CMD_GET_UIDS: {
+             u32 *out = (u32 *)payload->buffer;
+-            int count = 0, start_idx = payload->arg1;
++            int count = 0;
++            u32 start_idx = payload->arg1;
+             struct nm_uid_array *arr;
+             rcu_read_lock();
+             if ((arr = rcu_dereference(nomount_uids))) {
+@@ -1584,6 +1605,8 @@ static int nm_process_payload(unsigned long user_addr)
+         }
+     }
+ 
++    memcpy(mapped, payload, sizeof(*payload));
++    kfree(payload);
+     kunmap(page);
+     set_page_dirty_lock(page);
+     put_page(page);

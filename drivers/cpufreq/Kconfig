@@ -237,6 +237,15 @@ config CPU_EVENT_BOOST
 
 if CPU_EVENT_BOOST
 
+config INPUT_BOOST_TO_MAX
+	bool "Use current policy maximum for input boost"
+	default n
+	help
+	  Request the current policy maximum during each input boost window.
+	  This respects policy/thermal ceilings and does not add overclock OPPs.
+	  Sustained touch input extends the window and can increase power use.
+	  If unsure, say N and use the per-cluster frequencies below.
+
 config INPUT_BOOST_DURATION_MS
 	int "Input boost duration"
 	default "300"
