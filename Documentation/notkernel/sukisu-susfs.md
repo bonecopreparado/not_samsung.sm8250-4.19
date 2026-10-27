@@ -54,6 +54,10 @@ variant does not request SELinux permissive mode.
   fault-safe path copies, the chroot guard and live root-policy checks.
 - Compatibility with SUSFS 2.1 task markers and omission of the newer optional
   priority-UID command, which this port does not implement.
+- The existing authorized-app devpts relabel hook and synchronous SUSFS 2.1
+  path-loop operation under cached KSU credentials, including restoration of
+  the caller's credentials. The newer SUSFS worker object is not available in
+  this port.
 - Removal of unused unavailable headers and version guards for SELinux hiding
   hooks supported only on newer kernels.
 - Explicitly disabled built-in preinit runner: this tree has no matching init

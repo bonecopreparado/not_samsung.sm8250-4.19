@@ -158,6 +158,20 @@ int main(void) {
                 compile_and_run(self.root, code,
                                 [self.root / "KernelSU/kernel/include"])
 
+    @unittest.skipUnless(shutil.which("gcc"), "GCC is needed for the host harness")
+    def test_legacy_devpts_policy_and_susfs_credentials(self):
+        self.prepare()
+        source = (self.root / "KernelSU/kernel/feature/sucompat.c").read_text()
+        devpts = source[source.index("int ksu_handle_devpts("):]
+        devpts = devpts[:devpts.index("\n/* 4.19's access/stat")]
+        source = (self.root / "KernelSU/kernel/hook/lsm_hook.c").read_text()
+        work = source[source.index("static void ksu_handle_extra_susfs_work("):]
+        work = work[:work.index("\nstatic int handle_zygote_setresuid(")]
+        harness = (ROOT / "tests/sukisu_legacy_hooks_harness.c").read_text()
+        code = harness.replace("/* DEVPTS_UNDER_TEST */", devpts)
+        code = code.replace("/* WORK_UNDER_TEST */", work)
+        compile_and_run(self.root, code)
+
 
 class SusfsMacroTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("gcc"), "GCC is needed for the host harness")
