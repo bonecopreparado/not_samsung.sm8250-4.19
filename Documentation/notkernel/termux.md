@@ -60,7 +60,7 @@ Ainda dentro do Ubuntu:
 
 ```sh
 cd ~
-git clone --depth=1 --branch codex/r8q-sukisu-susfs \
+git clone --depth=1 --branch codex/sukisu-uapi6-termux \
     https://github.com/bonecopreparado/not_samsung.sm8250-4.19.git
 cd not_samsung.sm8250-4.19
 
@@ -69,8 +69,9 @@ set -o pipefail
 TC_DIR=/usr JOBS=2 UFS_AXI_MHZ=300 ./build-local.sh r8q ksu 2>&1 | tee build-r8q.log
 ```
 
-A branch precisa ser `codex/r8q-sukisu-susfs`: a padrão `staging` usa outro
-provedor de root. O script baixa os submódulos nos commits gravados, prepara
+A branch `codex/sukisu-uapi6-termux` contém esta atualização para teste no PR #4.
+Depois de incorporada, ela também estará em `codex/r8q-sukisu-susfs`. A padrão
+`staging` usa outro provedor de root. O script baixa os submódulos nos commits gravados, prepara
 os patches locais, compila `Image.gz`, DTBs e `dtbo.img`, e monta o ZIP AnyKernel3.
 `TC_DIR=/usr` seleciona as ferramentas do Ubuntu e evita baixar o Neutron.
 O perfil UFS de 300 MHz é o padrão. Não é necessário ativar o perfil experimental
