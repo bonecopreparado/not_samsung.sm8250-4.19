@@ -172,6 +172,63 @@ int main(void) {
         code = code.replace("/* WORK_UNDER_TEST */", work)
         compile_and_run(self.root, code)
 
+    @unittest.skipUnless(shutil.which("gcc"), "GCC is needed for the host harness")
+    def test_legacy_policy_initializes_susfs_sids_after_unlock(self):
+        self.prepare()
+        source = (self.root / "KernelSU/kernel/selinux/rules.c").read_text()
+        function = source[source.index("void apply_kernelsu_rules(void)"):]
+        function = function[:function.index("\n#define KSU_SEPOLICY_MAX_BATCH_SIZE")]
+        harness = (ROOT / "tests/sukisu_policy_sid_harness.c").read_text()
+        for susfs_enabled in (True, False):
+            with self.subTest(susfs_enabled=susfs_enabled):
+                config = "#define CONFIG_KSU_SUSFS\n" if susfs_enabled else ""
+                code = config + harness.replace("/* FUNCTION_UNDER_TEST */", function)
+                compile_and_run(self.root, code)
+
+    @unittest.skipUnless(shutil.which("gcc"), "GCC is needed for the host harness")
+    def test_boot_log_rc_is_optional_bounded_and_stops(self):
+        self.prepare()
+        source = (self.root / "KernelSU/kernel/runtime/ksud.c").read_text()
+        rc = source[source.index("static const char KERNEL_SU_RC[]"):
+                    source.index("static void stop_vfs_read_hook")]
+        harness = r'''
+#include <assert.h>
+#include <string.h>
+#define KERNEL_SU_DOMAIN "ksu"
+#define KSUD_PATH "/data/adb/ksud"
+/* RC_UNDER_TEST */
+int main(void) {
+    const char *post = strstr(KERNEL_SU_RC, "on post-fs-data\n");
+    const char *modules = strstr(KERNEL_SU_RC, "exec u:r:ksu:s0 root -- /data/adb/ksud post-fs-data");
+    const char *boot = strstr(KERNEL_SU_RC, "on property:sys.boot_completed=1\n");
+    assert(post && modules && boot);
+#ifdef CONFIG_KSU_BOOT_LOG
+    const char *start = strstr(post, "    start notkernel_bootlog\n");
+    const char *stop = strstr(boot, "    stop notkernel_bootlog\n");
+    const char *complete = strstr(boot, "exec u:r:ksu:s0 root -- /data/adb/ksud boot-completed");
+    const char *service = strstr(KERNEL_SU_RC, "\nservice notkernel_bootlog /system/bin/logcat ");
+    const char *mkdir = strstr(post, "mkdir /data/adb/notkernel-boot 0700 root root\n");
+    const char *clear_previous = strstr(post, "rm /data/adb/notkernel-boot/android.previous.log.1\n");
+    assert(start && start < modules);
+    assert(stop && complete && stop < complete);
+    assert(service && strstr(service, "-b main -b system -b crash"));
+    assert(strstr(service, "-f /data/adb/notkernel-boot/android.log -r 2048 -n 1 *:W\n"));
+    assert(strstr(service, "    seclabel u:r:ksu:s0\n    disabled\n"));
+    assert(!strstr(service, "oneshot")); /* retry a slow logd startup */
+    assert(mkdir && mkdir < start);
+    assert(clear_previous && clear_previous < start);
+#else
+    assert(!strstr(KERNEL_SU_RC, "notkernel_bootlog"));
+    assert(!strstr(KERNEL_SU_RC, "/data/adb/notkernel-boot"));
+#endif
+    return 0;
+}
+'''
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                config = "#define CONFIG_KSU_BOOT_LOG\n" if enabled else ""
+                compile_and_run(self.root, config + harness.replace("/* RC_UNDER_TEST */", rc))
+
 
 class SusfsMacroTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("gcc"), "GCC is needed for the host harness")

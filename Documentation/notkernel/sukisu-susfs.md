@@ -77,6 +77,23 @@ rejects conflicts. The expected modified submodule and patch checksum appear
 in build metadata. The `ksu` command remains compatible with existing usage;
 rooted ZIP filenames now explicitly include `sukisu-susfs`.
 
+`0002-initialize-legacy-susfs-sids.patch` populates the separate SUSFS domain
+SID cache after the legacy policy write lock is released and the AVC is reset.
+The upstream pre-5.10 path omitted this step. The core KSU cache's
+`Cached zygote SID` message does not initialize the SUSFS cache. Without it,
+the zygote/setresuid hook, manager fd installation, mount tagging and sdcard
+monitor cannot recognize the relevant SELinux domains.
+
+`0003-retain-android-boot-errors.patch` adds an optional `KSU_BOOT_LOG` setting,
+enabled temporarily in this branch's `ksu.config`. It starts logcat asynchronously
+before module scripts and stops it when `sys.boot_completed=1`. Warnings, errors
+and crash messages from Android's main/system/crash buffers are written to
+`/data/adb/notkernel-boot/android.log` and its rotated `.1` file. The previous
+boot's pair is kept as `android.previous.log` and `android.previous.log.1`.
+Each pair uses approximately 4 MiB at most; the directory is root-only (`0700`).
+This setting is separate from KSU debug mode and does not change SELinux mode
+or disable modules. Turn it off after boot validation.
+
 ## Verification
 
 The previous April SukiSU pin, before this update, was built with the r8q `ksu`
@@ -107,6 +124,20 @@ are in [termux.md](termux.md); the phone workflow itself still needs validation
 on a real device.
 
 ## First device test
+
+The 2026-10-27 device report for `4.19.325:Iowa/8e1d1f0d` shows repeated
+zygote/SystemServer starts followed by Samsung bootchecker rescue reboots,
+without a kernel panic. The supplied dmesg/logcat were captured in recovery;
+they do not contain Android's fatal error. The SID initialization defect is
+confirmed in source, but its role in that bootloop is not established. The next
+device test must verify boot; a successful build alone does not resolve this.
+
+If it loops again, collect `/data/adb/notkernel-boot/android*` from recovery
+alongside `last_kmsg` (with `/data` decrypted). These are the Android boot logs,
+unlike running `logcat` after starting recovery. Logs may contain app details;
+only the relevant error excerpt is needed. After a successful boot, confirm
+`sid ... is set for secctx_name 'u:r:zygote:s0'` and `'u:r:ksu:s0'` in dmesg,
+then check Manager fd installation as described below.
 
 Build `JOBS=12 UFS_AXI_MHZ=300 ./build-local.sh r8q ksu` first. Keep a known
 working boot/kernel backup. With the matching Manager and modules initially

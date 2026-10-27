@@ -1,0 +1,25 @@
+Subject: [PATCH] SukiSU: initialize SUSFS domain SIDs on legacy kernels
+
+The pre-5.10 policy path reset the AVC but never populated the SUSFS SID
+cache. The separate cache_sid() call only fills the core KSU cache, leaving
+SUSFS domain comparisons against zero. This breaks zygote child handling,
+manager fd installation, mount tagging and the sdcard monitor on 4.19.
+
+Resolve the SIDs after releasing the policy write lock (or stop_machine)
+and resetting the AVC, matching the ordering of the newer policy path.
+SID resolution may take the policy read lock, so it must remain outside
+the write-side critical section.
+
+diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
+--- a/kernel/selinux/rules.c
++++ b/kernel/selinux/rules.c
+@@ -257,6 +257,9 @@ do_stop_machine:
+ out_flush:
+     smp_mb();
+     reset_avc_cache();
++#ifdef CONFIG_KSU_SUSFS
++    susfs_set_batch_sid();
++#endif
+ #endif
+ }
+ 

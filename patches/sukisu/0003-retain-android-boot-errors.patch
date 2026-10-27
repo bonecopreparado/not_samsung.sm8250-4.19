@@ -1,0 +1,71 @@
+Subject: [PATCH] SukiSU: optionally retain Android boot errors for recovery
+
+The reported bootloop logs contain recovery logcat, not the Android
+zygote/system_server abort. Add an opt-in asynchronous logcat service to
+the existing init.rc injection. Start before modules, retain warning/error
+and crash buffers in a root-only directory, and stop at boot completion.
+Limit each of the current and previous boot logs to two 2 MiB files.
+This does not disable modules, alter SELinux enforcement or block boot.
+
+diff --git a/kernel/Kconfig b/kernel/Kconfig
+--- a/kernel/Kconfig
++++ b/kernel/Kconfig
+@@ -14,6 +14,16 @@
+ 	default y
+ 	help
+ 	  Build KernelSU's adb root feature.
++
++config KSU_BOOT_LOG
++	bool "Persist Android boot errors (NotKernel diagnostics)"
++	depends on KSU
++	default n
++	help
++	  Capture Android warning/error and crash logs during boot in
++	  /data/adb/notkernel-boot, accessible only to root. Stop capture at
++	  sys.boot_completed. Keep up to two 2 MiB files for the current boot
++	  and two for the previous boot. This does not enable KSU debug mode.
+ 
+ config KSU_DEBUG
+ 	bool "KernelSU debug mode"
+diff --git a/kernel/runtime/ksud.c b/kernel/runtime/ksud.c
+--- a/kernel/runtime/ksud.c
++++ b/kernel/runtime/ksud.c
+@@ -6,6 +6,17 @@
+ 
+     "on post-fs-data\n"
+     "    start logd\n"
++#ifdef CONFIG_KSU_BOOT_LOG
++    // Keep Android's crash reason across a reboot into recovery. Do not wait
++    // for logcat: boot and module setup must continue independently of it.
++    "    mkdir /data/adb 0700 root root\n"
++    "    mkdir /data/adb/notkernel-boot 0700 root root\n"
++    "    rm /data/adb/notkernel-boot/android.previous.log\n"
++    "    rm /data/adb/notkernel-boot/android.previous.log.1\n"
++    "    rename /data/adb/notkernel-boot/android.log /data/adb/notkernel-boot/android.previous.log\n"
++    "    rename /data/adb/notkernel-boot/android.log.1 /data/adb/notkernel-boot/android.previous.log.1\n"
++    "    start notkernel_bootlog\n"
++#endif
+     // We should wait for the post-fs-data finish
+     "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs-data\n"
+     "\n"
+@@ -19,9 +30,20 @@
+     "\n"
+ 
+     "on property:sys.boot_completed=1\n"
++#ifdef CONFIG_KSU_BOOT_LOG
++    "    stop notkernel_bootlog\n"
++#endif
+     "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH
+     " boot-completed\n"
+     "\n"
++#ifdef CONFIG_KSU_BOOT_LOG
++    "service notkernel_bootlog /system/bin/logcat -b main -b system -b crash -v threadtime -f /data/adb/notkernel-boot/android.log -r 2048 -n 1 *:W\n"
++    "    user root\n"
++    "    group root log\n"
++    "    seclabel u:r:" KERNEL_SU_DOMAIN ":s0\n"
++    "    disabled\n"
++    "\n"
++#endif
+ 
+     "\n";
+ 
