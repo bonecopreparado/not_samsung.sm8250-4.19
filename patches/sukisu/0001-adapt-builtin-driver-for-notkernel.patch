@@ -1,25 +1,83 @@
-Subject: [PATCH] SukiSU: adapt the pinned builtin driver to NotKernel 4.19
+Subject: [PATCH] SukiSU: adapt builtin UAPI 6 to NotKernel 4.19 and SUSFS 2.1
 
-Pin: SukiSU-Ultra/SukiSU-Ultra 624727d1077f5afea894f066bcb8ca70079cf802.
-Keep version generation offline, remove the unused compile.h dependency,
-handle CONFIG_SECCOMP=n, and use local string checks for the SUSFS 2.1 API.
+Pin: SukiSU-Ultra/SukiSU-Ultra fbc67d004b3b68723e91dd86d50dead1120b4a9a.
+Use reproducible version metadata and the existing init.rc boot path rather
+than advertising the new preinit runner without its required exec hook.
+Remove missing unused headers, keep CONFIG_SECCOMP=n buildable, and guard
+SELinux-hide calls whose implementation only exists on kernels >= 5.10.
 
-Backport the throne-tracker bounds/allocation fixes from upstream commits
-c6d2bb9a9f6e56b75b791c002482f15ac984b53e (Kamenta) and
-8c74411cb713be2e106b2f15f3c4bf5f02274efd (Wang Han).
-Recheck root grants in sucompat, following the revocation fix in
-03079cccc9910624344d69d544bc2dcc7235f5fe (ShirkNeko); retain this revision's
-boolean hooks instead of importing the later SUSFS API migration.
+Keep 4.19's stat/access user-pointer ABI, fault-safe copies, chroot checks,
+and live root-grant checks. Read an extra byte so legacy nofault truncation
+cannot turn a longer filename into an exact su match.
+
+SUSFS 2.1 does not implement the later priority filter or separate no-su /
+zygote_next task markers. Do not expose unsupported commands or invent
+no-op APIs: retain its real umounted flag, umount/work handling, and live
+allowlist gates. This preserves the existing SUSFS 2.1 behavior; it does not
+claim to backport the later SUSFS features. Throne-tracker bounds and root
+revocation fixes from the old patch are already in this upstream revision.
+
+Disable the optional CPU spoof extension on this legacy tree: its new code
+assumes an enum clocksource mode and enum-sized vdso_default, while this
+backport uses bool vdso_direct / vdso_default and the opposite datapage mode.
+It also assumes two native HWCAP words and a different CPU workaround bit
+mapping. Do not register the handler or perform partial kernel-memory writes;
+its direct IO entry returns -EOPNOTSUPP before touching the supplied pointer.
+Guard feature names and policy locals by the same versions as their actual
+SELinux implementations instead of suppressing compiler diagnostics.
+
+Restore the two remaining real SUSFS 2.1 integrations used by this kernel:
+run its path-loop synchronously in the caller namespace with cached KSU
+credentials (restoring the caller credentials afterward), and relabel devpts
+inodes only for currently root-allowed app UIDs using the cached file SID.
+Do not invent the newer SUSFS worker or substitute a no-op devpts handler.
 
 diff --git a/kernel/Makefile b/kernel/Makefile
-index 9abf634..ec888f6 100644
+index bed47b8..307733e 100644
 --- a/kernel/Makefile
 +++ b/kernel/Makefile
-@@ -11,35 +11,10 @@ else
- ccflags-y += -I$(srctree)/$(src) -I$(srctree)/$(src)/include
+@@ -18,70 +18,19 @@ else
+ ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
  endif
  
 -MDIR    := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+-
+-# ===== preinit runner =====
+-KSU_UAPI_INC := $(objtree)/usr/include
+-ifneq ($(wildcard $(KSU_UAPI_INC)/linux/unistd.h),)
+-ksu-y += preinit/preinit.o preinit/blob.o
+-
+-KSU_RUNNER_CFLAGS := $(CLANG_FLAGS) -std=gnu11 -Os -Wall \
+-	-nostdinc -isystem $(shell $(CC) -print-file-name=include) \
+-	-I$(KSU_KERNEL_DIR)/preinit/runner/nolibc -I$(KSU_UAPI_INC) \
+-	-I$(KSU_KERNEL_DIR)/include \
+-	-ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+-	-fno-asynchronous-unwind-tables -fno-unwind-tables \
+-	-ffunction-sections -fdata-sections
+-
+-quiet_cmd_ksu_runner = RUNNER  $@
+-      cmd_ksu_runner = $(CC) $(KSU_RUNNER_CFLAGS) -c -o $@.o $< && \
+-		$(LD) -static -nostdlib -e _start --gc-sections -s -o $@ $@.o && \
+-		rm -f $@.o
+-
+-$(obj)/preinit/runner.elf: $(KSU_KERNEL_DIR)/preinit/runner/runner.c \
+-		$(wildcard $(KSU_KERNEL_DIR)/preinit/runner/nolibc/*.h \
+-			   $(KSU_KERNEL_DIR)/preinit/runner/nolibc/sys/*.h \
+-			   $(KSU_KERNEL_DIR)/include/uapi/*.h) FORCE
+-	$(call if_changed,ksu_runner)
+-
+-targets += preinit/runner.elf
+-
+-$(obj)/preinit/blob.o: $(obj)/preinit/runner.elf
+-asflags-y += -DKSU_PREINIT_RUNNER_BIN=\"$(abspath $(obj)/preinit/runner.elf)\"
+-
+-else
+-$(warning -- KernelSU: $(KSU_UAPI_INC) not found, preinit disabled)
++# This 4.19 integration uses the existing init.rc hooks. It has no preinit
++# exec hook, so installing exported headers must not advertise a runner.
+ ccflags-y += -DKSU_NO_PREINIT
+-endif
+-# ===== end preinit runner =====
 -
 -REPO_OWNER  := SukiSU-Ultra
 -REPO_NAME   := SukiSU-Ultra
@@ -38,25 +96,87 @@ index 9abf634..ec888f6 100644
 -git_branch       = $(shell cd $(KSU_SRC) && $(GIT_BIN) rev-parse --abbrev-ref HEAD 2>/dev/null)
 -git_commit_count = $(shell cd $(KSU_SRC) && $(GIT_BIN) rev-list --count $(REPO_BRANCH) 2>/dev/null)
 -git_latest_tag   = $(shell cd $(KSU_SRC) && $(GIT_BIN) describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
--
+ 
 -$(shell cd $(KSU_SRC) 2>/dev/null && [ -f ../.git/shallow ] && $(GIT_BIN) fetch --unshallow 2>/dev/null)
--
++# CPU spoof assumes modern clocksource/HWCAP layouts and workaround IDs.
++# Do not expose it on this legacy tree; the core UAPI and root hooks remain.
++ccflags-y += -DKSU_NO_CPU_SPOOF
+ 
 -GITHUB_API_BASE  := https://api.github.com/repos/$(REPO_OWNER)/$(REPO_NAME)
 -KSU_GITHUB_VER   := $(shell $(CURL_BIN) -s "$(GITHUB_API_BASE)/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
 -GITHUB_COMMITS   := $(shell $(CURL_BIN) -sI "$(GITHUB_API_BASE)/commits?sha=$(REPO_BRANCH)&per_page=1" 2>/dev/null | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
 -LOCAL_COUNT     := $(if $(GITHUB_COMMITS),$(GITHUB_COMMITS),$(git_commit_count))
 -KSU_VERSION     := $(if $(LOCAL_COUNT),$(shell expr $(VERSION_BASE) + $(LOCAL_COUNT) - $(VERSION_OFFSET)),13000)
--VERSION_TAG     := $(or $(KSU_GITHUB_VER),$(git_latest_tag),4.1.2)
+-VERSION_TAG     := $(or $(KSU_GITHUB_VER),$(git_latest_tag),4.2.1)
 -KSU_VERSION_FULL := $(if $(call git_short_sha),v$(VERSION_TAG)-$(call git_short_sha)@$(call git_branch),v$(VERSION_TAG)-$(REPO_NAME)-unknown@unknown)
-+# Version metadata belongs to the pinned source, not a moving remote branch.
++# Pinned metadata, without network requests from make. Upstream's formula is
++# 40000 + main commit count (3910 on 2026-10-27) - 2815 = 41095.
 +REPO_NAME := SukiSU-Ultra
-+KSU_VERSION := 40545
-+KSU_VERSION_FULL := v4.1.2-624727d1-notkernel
++KSU_VERSION := 41095
++KSU_VERSION_FULL := v4.2.1-fbc67d00-notkernel
  $(info -- $(REPO_NAME) version: $(KSU_VERSION) [$(KSU_VERSION_FULL)])
  
  ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+diff --git a/kernel/extension/cpu_spoof.c b/kernel/extension/cpu_spoof.c
+index 0007c2f..7118c6d 100644
+--- a/kernel/extension/cpu_spoof.c
++++ b/kernel/extension/cpu_spoof.c
+@@ -10,6 +10,17 @@
+  * is rejected with a dmesg warning and clears the forced-pending bit.
+  * The default force semantics are not obvious (per-device MIDR).
+  */
++#include <linux/errno.h>
++
++#ifdef KSU_NO_CPU_SPOOF
++/* This tree has bool vdso_direct/vdso_default, scalar elf_hwcap and different
++ * workaround IDs. Reject before any user copy, symbol lookup or kernel write.
++ */
++int ksu_extension_cpu_spoof_io(u32 id, void __user *raw)
++{
++    return -EOPNOTSUPP;
++}
++#else
+ #include <linux/kernel.h>
+ #include <linux/types.h>
+ #include <linux/cpumask.h>
+@@ -236,3 +247,5 @@ int ksu_extension_cpu_spoof_io(u32 id, void __user *raw)
+ 
+     return set_spoof_cpu(&cmd);
+ }
++
++#endif /* KSU_NO_CPU_SPOOF */
+diff --git a/kernel/extension/extension.c b/kernel/extension/extension.c
+index b64aa5e..5d368c9 100644
+--- a/kernel/extension/extension.c
++++ b/kernel/extension/extension.c
+@@ -416,12 +416,14 @@ void __init ksu_extension_register_all(void)
+         .io_handler = ksu_extension_kpm_io,
+         .apply_forced = ksu_extension_kpm_apply_forced,
+     };
++#ifndef KSU_NO_CPU_SPOOF
+     static const struct ksu_extension_handler cpu_spoof_handler = {
+         .extension_id = KSU_EXTENSION_CPU_SPOOF,
+         .name = "cpu_spoof",
+         .ops = NULL,
+         .io_handler = ksu_extension_cpu_spoof_io,
+     };
++#endif
+     static const struct ksu_extension_handler umount_paths_handler = {
+         .extension_id = KSU_EXTENSION_UMOUNT_PATHS,
+         .name = "umount_paths",
+@@ -451,8 +453,10 @@ void __init ksu_extension_register_all(void)
+ 
+     if (ksu_register_extension_handler(&kpm_handler))
+         pr_err("extension: failed to register kpm\n");
++#ifndef KSU_NO_CPU_SPOOF
+     if (ksu_register_extension_handler(&cpu_spoof_handler))
+         pr_err("extension: failed to register cpu_spoof\n");
++#endif
+     if (ksu_register_extension_handler(&umount_paths_handler))
+         pr_err("extension: failed to register umount_paths\n");
+     if (ksu_register_extension_handler(&dynamic_manager_handler))
 diff --git a/kernel/feature/adb_root.c b/kernel/feature/adb_root.c
-index 55a5e0a..7db4af9 100644
+index d2f867c..c383233 100644
 --- a/kernel/feature/adb_root.c
 +++ b/kernel/feature/adb_root.c
 @@ -10,8 +10,11 @@ static inline long is_exec_adbd(const char *filename)
@@ -74,22 +194,223 @@ index 55a5e0a..7db4af9 100644
  #else
  static const char kAdbd[] = "/adbd";
 diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
-index 0cf59f2..ac3211a 100644
+index f458e56..eec22ff 100644
 --- a/kernel/feature/sucompat.c
 +++ b/kernel/feature/sucompat.c
-@@ -124,6 +124,10 @@ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
-     if (!ksu_handle_execveat_init(filename, (struct user_arg_ptr*)argv_user, (struct user_arg_ptr*)envp_user))
-         return 0;
+@@ -74,7 +74,8 @@ int ksu_handle_execveat_init(struct filename *filename, struct user_arg_ptr *arg
  
-+    /* Recheck grants: the task's SUSFS flags can outlive a revoked profile. */
-+    if (!__ksu_is_allow_uid_for_current(current_uid().val))
-+        return 0;
+     if (likely(!strstr(filename->name, "/app_process") && !strstr(filename->name, "/adbd") && !strstr(filename->name, "/stub_zygote"))) {
+         pr_info("susfs: mark no sucompat checks for pid: '%d', exec: '%s'\n", current->pid, filename->name);
+-        susfs_set_current_proc_no_su();
++        /* SUSFS 2.1 has no no-su task marker. Live allowlist checks below
++         * and at the kernel call sites still decide every su request. */
+         // - marking proc umounted here is useless because only zygote spawned processes will umount
+         //   the sus mounts, tho other susfs features still rely on proc_umounted check, but
+         //   it is fine to not spoof for init spawned processes.
+@@ -179,44 +180,72 @@ int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
+                         flags);
+ }
+ 
+-int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode,
+-             int *__unused_flags)
++extern u32 ksu_file_sid;
 +
-     if (likely(memcmp(filename->name, su_path, sizeof(su_path))))
++/* Keep the 4.19 devpts hook's real SELinux relabeling for root-allowed apps.
++ * The latest non-SUSFS-only no-op cannot satisfy this kernel's SUSFS caller.
++ */
++int ksu_handle_devpts(struct inode *inode)
+ {
+-    if (unlikely(IS_ERR(*filename) || (*filename)->name == NULL))
+-        return 0;
++    struct inode_security_struct *sec;
++    uid_t uid;
++    u32 sid;
+ 
+-    if (likely(memcmp((*filename)->name, su_path, sizeof(su_path))))
++    if (!inode || !current->mm)
+         return 0;
+-
+-    if (current_chrooted())
+-    {
+-        pr_err("ksu_handle_faccessat: su found but NOT allowed! Because current process is running in chrooted environment\n");
++    uid = current_uid().val;
++    if (uid % 100000 < 10000 || !__ksu_is_allow_uid_for_current(uid))
+         return 0;
+-    }
+-
+-    pr_info("ksu_handle_faccessat: su->sh!\n");
+-    memcpy((void *)((*filename)->name), sh_path, sizeof(sh_path));
++    sid = READ_ONCE(ksu_file_sid);
++    if (!sid)
++        return 0;
++    sec = selinux_inode(inode);
++    if (sec)
++        sec->sid = sid;
+     return 0;
+ }
+ 
+-int ksu_handle_stat(int *dfd, struct filename **filename, int *flags) {
+-    if (unlikely(IS_ERR(*filename) || (*filename)->name == NULL))
+-        return 0;
++/* 4.19's access/stat hooks run before getname(): these arguments are user
++ * paths, not struct filename. Copy safely before inspecting or replacing one.
++ */
++static int ksu_handle_path_user(const char __user **filename, const char *syscall_name)
++{
++    /* The old nofault helper terminates a full buffer: preserve the byte
++     * after su's NUL position so longer names cannot become an exact match.
++     */
++    char path[sizeof(su_path) + 1] = { 0 };
++    char __user *replacement;
+ 
+-    if (likely(memcmp((*filename)->name, su_path, sizeof(su_path))))
++    if (!filename || !*filename || IS_ERR(*filename))
++        return 0;
++    if (!READ_ONCE(ksu_su_compat_enabled) ||
++        !__ksu_is_allow_uid_for_current(current_uid().val))
++        return 0;
++    if (ksu_strncpy_from_user_nofault(path, *filename, sizeof(path)) <= 0)
++        return 0;
++    if (memcmp(path, su_path, sizeof(su_path)) || current_chrooted())
          return 0;
  
+-    if (current_chrooted())
+-    {
+-        pr_err("ksu_handle_stat: su found but NOT allowed! Because current process is running in chrooted environment\n");
++    replacement = sh_user_path();
++    if (!replacement)
+         return 0;
+-    }
+ 
+-    pr_info("ksu_handle_stat: su->sh!\n");
+-    memcpy((void *)((*filename)->name), sh_path, sizeof(sh_path));
++    pr_info("%s: su->sh!\n", syscall_name);
++    *filename = replacement;
+     return 0;
+ }
+ 
++int ksu_handle_faccessat(int *dfd, const char __user **filename, int *mode,
++             int *__unused_flags)
++{
++    return ksu_handle_path_user(filename, "faccessat");
++}
++
++int ksu_handle_stat(int *dfd, const char __user **filename, int *flags)
++{
++    return ksu_handle_path_user(filename, "stat");
++}
++
+ #else
+ __attribute__((hot)) static __always_inline bool __is_su_allowed(const void **ptr_to_check)
+ {
+diff --git a/kernel/feature/sucompat.h b/kernel/feature/sucompat.h
+index 4bc7437..e65a1b1 100644
+--- a/kernel/feature/sucompat.h
++++ b/kernel/feature/sucompat.h
+@@ -6,8 +6,9 @@
+ extern bool ksu_su_compat_enabled;
+ 
+ #ifdef CONFIG_KSU_SUSFS
+-int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);
+-int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
++int ksu_handle_devpts(struct inode *inode);
++int ksu_handle_faccessat(int *dfd, const char __user **filename, int *mode, int *__unused_flags);
++int ksu_handle_stat(int *dfd, const char __user **filename, int *flags);
+ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
+                  void *argv_user, void *envp_user,
+                  int *flags);
+diff --git a/kernel/hook/lsm_hook.c b/kernel/hook/lsm_hook.c
+index 4990551..b8b0b01 100644
+--- a/kernel/hook/lsm_hook.c
++++ b/kernel/hook/lsm_hook.c
+@@ -20,20 +20,35 @@ static int ksu_key_permission(key_ref_t key_ref, const struct cred *cred, unsign
+ extern u32 susfs_zygote_sid;
+ extern u32 susfs_zygote_next_sid;
+ extern void disable_seccomp(void);
+-extern struct work_struct susfs_extra_works;
++#ifdef CONFIG_KSU_SUSFS_SUS_PATH
++extern void susfs_run_sus_path_loop(void);
++#endif
++
++/* SUSFS 2.1 uses its single umounted flag for spoofing; it has no separate
++ * no-su or zygote_next marker. Keep real umount/work and manager handling;
++ * every sucompat hook still checks the live allowlist before granting root.
++ */
+ 
+-static inline void ksu_handle_extra_susfs_work(void)
++/* SUSFS 2.1 resolves its path-loop entries in the caller's mount namespace.
++ * Preserve its synchronous loop under cached KSU credentials; the later
++ * global susfs_extra_works worker is not part of this SUSFS revision.
++ */
++static void ksu_handle_extra_susfs_work(void)
+ {
+-    if (work_pending(&susfs_extra_works))
+-        return;
++#ifdef CONFIG_KSU_SUSFS_SUS_PATH
++    const struct cred *saved;
+ 
+-    schedule_work(&susfs_extra_works);
++    if (!ksu_cred)
++        return;
++    saved = override_creds(ksu_cred);
++    susfs_run_sus_path_loop();
++    revert_creds(saved);
++#endif
+ }
+ 
+ static int handle_zygote_setresuid(uid_t ruid) {
+     // Check if spawned process is isolated service first, and force to do umount if so
+     if (is_isolated_process(ruid)) {
+-        susfs_set_current_proc_no_su();
+         susfs_set_current_proc_umounted();
+         goto do_umount;
+     }
+@@ -52,7 +67,6 @@ static int handle_zygote_setresuid(uid_t ruid) {
+     // - Check if spawned process is normal user app and needs to be umounted
+     // - Now app_profile for webview_zygote is available in KernelSU manager
+     if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
+-        susfs_set_current_proc_no_su();
+         susfs_set_current_proc_umounted();
+         goto do_umount;
+     }
+@@ -64,7 +78,6 @@ static int handle_zygote_setresuid(uid_t ruid) {
+     }
+ 
+     // Process not umounted but also root not allowed
+-    susfs_set_current_proc_no_su();
+     return 0;
+ 
+ do_umount:
+@@ -82,9 +95,7 @@ do_umount:
+ static int handle_zygote_next_setresuid(uid_t ruid) {
+     // Check if spawned process is isolated service first, and force to do umount if so
+     if (is_isolated_process(ruid)) {
+-        susfs_set_current_proc_no_su();
+         susfs_set_current_proc_umounted();
+-        susfs_set_current_proc_umounted_for_zygote_next();
+         goto do_susfs_work;
+     }
+ 
+@@ -102,9 +113,7 @@ static int handle_zygote_next_setresuid(uid_t ruid) {
+     // - Check if spawned process is normal user app and needs to be umounted
+     // - Now app_profile for webview_zygote is available in KernelSU manager
+     if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
+-        susfs_set_current_proc_no_su();
+         susfs_set_current_proc_umounted();
+-        susfs_set_current_proc_umounted_for_zygote_next();
+         goto do_susfs_work;
+     }
+ 
+@@ -115,7 +124,6 @@ static int handle_zygote_next_setresuid(uid_t ruid) {
+     }
+ 
+     // Process not umounted but also root not allowed
+-    susfs_set_current_proc_no_su();
+     return 0;
+ 
+ do_susfs_work:
 diff --git a/kernel/kernel_includes.h b/kernel/kernel_includes.h
-index 124f0c0..d2fc69d 100644
+index 422fde3..e613a14 100644
 --- a/kernel/kernel_includes.h
 +++ b/kernel/kernel_includes.h
 @@ -5,7 +5,6 @@
@@ -100,48 +421,43 @@ index 124f0c0..d2fc69d 100644
  #include <generated/utsrelease.h>
  #include <linux/aio.h>
  #include <linux/anon_inodes.h>
-diff --git a/kernel/manager/throne_tracker.c b/kernel/manager/throne_tracker.c
-index dcdb812..ae2d902 100644
---- a/kernel/manager/throne_tracker.c
-+++ b/kernel/manager/throne_tracker.c
-@@ -96,7 +96,7 @@ FILLDIR_RETURN_TYPE my_actor(struct dir_context *ctx, const char *name, int name
-     }
+@@ -73,7 +72,6 @@
+ #include <linux/vmalloc.h>
+ #include <linux/tty.h>
+ #include <linux/kref.h>
+-#include <linux/static_call.h>
+ #include "arch.h"
+ #ifdef CONFIG_KSU_SUSFS
+ #include <linux/susfs.h>
+diff --git a/kernel/manager/pkg_observer.c b/kernel/manager/pkg_observer.c
+index 375e6b6..fa7a8c0 100644
+--- a/kernel/manager/pkg_observer.c
++++ b/kernel/manager/pkg_observer.c
+@@ -31,8 +31,10 @@ static void ksu_defer_track_throne(void)
+ {
+     struct callback_head *cb;
  
-     if (d_type == DT_DIR && my_ctx->depth > 0 && (my_ctx->stop && !*my_ctx->stop)) {
--        struct data_path *data = kzalloc(sizeof(struct data_path), GFP_ATOMIC);
-+        struct data_path *data = kzalloc(sizeof(struct data_path), GFP_KERNEL);
+-    // Renew the getpriority uid bitmap filter
++#ifdef CMD_SUSFS_SET_PRIORITY_UID_FILTER
++    // Renew the getpriority uid bitmap filter when supported by SUSFS.
+     susfs_parse_priority_app_strings();
++#endif
  
-         if (!data) {
-             pr_err("Failed to allocate memory for %s\n", dirpath);
-@@ -242,9 +242,13 @@ void track_throne(bool prune_only)
-         if (chr != '\n')
-             continue;
- 
--        count = kernel_read(fp, buf, sizeof(buf), &line_start);
-+        count = kernel_read(fp, buf, sizeof(buf) - 1, &line_start);
-+        if (count <= 0) {
-+            break;
-+        }
-+        buf[count] = '\0';
- 
--        struct uid_data *data = kzalloc(sizeof(struct uid_data), GFP_ATOMIC);
-+        struct uid_data *data = kzalloc(sizeof(struct uid_data), GFP_KERNEL);
-         if (!data) {
-             filp_close(fp, 0);
-             goto out;
+     if (!(current->flags & PF_KTHREAD)) {
+         cb = kzalloc(sizeof(*cb), GFP_KERNEL);
 diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
-index 5af5c84..f21e425 100644
+index e956748..7673e9c 100644
 --- a/kernel/policy/app_profile.c
 +++ b/kernel/policy/app_profile.c
 @@ -54,6 +54,7 @@ void seccomp_filter_release(struct task_struct *tsk);
  
- static void disable_seccomp(void)
+ void disable_seccomp(void)
  {
 +#ifdef CONFIG_SECCOMP
      if (!!!current->seccomp.mode) {
          return;
      }
-@@ -102,6 +103,7 @@ static void disable_seccomp(void)
+@@ -102,6 +103,7 @@ void disable_seccomp(void)
      seccomp_filter_release(fake);
      kfree(fake);
  #endif
@@ -149,3 +465,81 @@ index 5af5c84..f21e425 100644
  }
  
  int escape_with_root_profile(void)
+diff --git a/kernel/policy/feature.c b/kernel/policy/feature.c
+index 05ae163..d499510 100644
+--- a/kernel/policy/feature.c
++++ b/kernel/policy/feature.c
+@@ -7,7 +7,9 @@ static const char *const feature_names[KSU_FEATURE_MAX] = {
+     [KSU_FEATURE_KERNEL_UMOUNT] = "kernel_umount",
+     [KSU_FEATURE_SULOG] = "sulog",
+     [KSU_FEATURE_ADB_ROOT] = "adb_root",
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     [KSU_FEATURE_SELINUX_HIDE] = "selinux_hide",
++#endif
+     [KSU_FEATURE_SHELL_SU_ADB_ONLY] = "shell_su_adb_only",
+     [KSU_FEATURE_MOUNT_HIDE] = "mount_hide",
+ };
+diff --git a/kernel/runtime/ksud.c b/kernel/runtime/ksud.c
+index ad6c657..930aa46 100644
+--- a/kernel/runtime/ksud.c
++++ b/kernel/runtime/ksud.c
+@@ -55,7 +55,9 @@ void on_post_fs_data(void)
+     ksu_observer_init();
+     // sanity check, this may influence the performance
+     stop_input_hook();
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     ksu_selinux_hide_handle_post_fs_data();
++#endif
+     // retry forced features which failed at second stage
+     ksu_feature_apply_forced();
+     ksu_extension_apply_forced();
+@@ -202,7 +204,9 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
+ #ifndef KSU_NO_PREINIT
+                 ksu_preinit_release();
+ #endif
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+                 ksu_selinux_hide_handle_second_stage();
++#endif
+                 apply_kernelsu_rules();
+                 cache_sid();
+                 setup_ksu_cred();
+@@ -280,7 +284,9 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, struct use
+ #ifndef KSU_NO_PREINIT
+             ksu_preinit_release();
+ #endif
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+             ksu_selinux_hide_handle_second_stage();
++#endif
+             apply_kernelsu_rules();
+             cache_sid();
+             setup_ksu_cred();
+diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
+index 3d5b86e..d3f95a7 100644
+--- a/kernel/selinux/rules.c
++++ b/kernel/selinux/rules.c
+@@ -151,7 +151,9 @@ static int apply_kernelsu_rules_fn(void *ptr)
+ 
+ void apply_kernelsu_rules(void)
+ {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     struct selinux_policy *pol, *old_pol;
++#endif
+     struct policydb *db;
+ 
+     if (!getenforce()) {
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+index 22bf2d2..b647dbf 100644
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -474,9 +474,11 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
+             susfs_add_sus_map(arg);
+             return 0;
+ #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
++#ifdef CMD_SUSFS_SET_PRIORITY_UID_FILTER
+         case CMD_SUSFS_SET_PRIORITY_UID_FILTER:
+             susfs_set_priority_uid_filter(arg);
+             return 0;
++#endif
+         case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:
+             susfs_set_avc_log_spoofing(arg);
+             return 0;

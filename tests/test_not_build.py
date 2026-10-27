@@ -85,7 +85,7 @@ elif args[0] == "clone":
 elif args[0] == "-C":
     if "rev-parse" in args:
         print("d6cb7158b5a98a8168fa7bae191e23cbcfd38974" if args[1] == "NoMount"
-              else "624727d1077f5afea894f066bcb8ca70079cf802" if args[1] == "KernelSU"
+              else "fbc67d004b3b68723e91dd86d50dead1120b4a9a" if args[1] == "KernelSU"
               else os.environ.get("AK3_COMMIT", "b" * 40))
     elif "fetch" in args and os.environ.get("FAIL_AK3_FETCH"):
         sys.exit(45)
@@ -129,9 +129,7 @@ class BuildScriptsTest(unittest.TestCase):
             "vendor/samsung/kona-sec-common.config": "CONFIG_COMMON=y\n",
             "vendor/samsung/r8q.config": "CONFIG_SEC_R8Q_PROJECT=y\n",
             "vendor/not/localversion.config": 'CONFIG_LOCALVERSION="-not"\n',
-            "vendor/not/ksu.config": (
-                "CONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n"
-                "CONFIG_KSU_LSM_HOOKS=y\nCONFIG_KSU_SUSFS=y\n"),
+            "vendor/not/ksu.config": "CONFIG_KSU=y\nCONFIG_KSU_SUSFS=y\n",
             "vendor/not/permissive.config": "CONFIG_SECURITY_SELINUX_PERMISSIVE=y\n",
             "vendor/not/ufs-333.config": "CONFIG_R8Q_UFS_AXI_333MHZ=y\n",
             "vendor/not/ufs-default.config": "# CONFIG_R8Q_UFS_AXI_333MHZ is not set\n",
@@ -311,7 +309,7 @@ class BuildScriptsTest(unittest.TestCase):
         self.assertFalse((self.root / "make.jsonl").exists())
 
     def test_rooted_variant_rejects_unrequested_features(self):
-        required = "CONFIG_KSU=y\nCONFIG_KSU_LSM_HOOKS=y\nCONFIG_KSU_MANUAL_HOOK=y\nCONFIG_KSU_SUSFS=y\n"
+        required = "CONFIG_KSU=y\nCONFIG_KSU_SUSFS=y\n"
         for option in ("KPM", "KSU_DEBUG", "KSU_MANUAL_SU"):
             with self.subTest(option=option):
                 self.assert_failure(self.run_build("ksu", extra={
@@ -336,9 +334,8 @@ class BuildScriptsTest(unittest.TestCase):
         for variant, config in (
             ("ksu", "# CONFIG_KSU is not set\n"),
             ("ksu+permissive", "CONFIG_KSU=m\n"),
-            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_LSM_HOOKS=y\nCONFIG_KSU_MANUAL_HOOK=y\n"),
-            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_SUSFS=y\nCONFIG_KSU_MANUAL_HOOK=y\n"),
-            ("ksu", "CONFIG_KSU=y\nCONFIG_KSU_LSM_HOOKS=y\nCONFIG_KSU_SUSFS=y\n"),
+            ("ksu", "CONFIG_KSU=y\n"),
+            ("ksu", "CONFIG_KSU_SUSFS=y\n"),
             ("stock", "CONFIG_KSU=y\n"),
             ("stock", "CONFIG_KSU=m\n"),
         ):
@@ -369,6 +366,36 @@ class BuildScriptsTest(unittest.TestCase):
         self.assert_failure(self.run_build(), "Incomplete toolchain")
         self.assertFalse((self.root / "make.jsonl").exists())
 
+    def emulate_arm64_host(self):
+        self.write_command(self.bin / "uname", '''#!/bin/sh
+case "$1" in
+    -s) echo Linux ;;
+    -m) echo aarch64 ;;
+    *) exit 98 ;;
+esac
+''')
+
+    def test_arm64_rejects_default_toolchain_download_before_curl_or_make(self):
+        self.emulate_arm64_host()
+        shutil.rmtree(self.tc)
+        download_log = self.root / "download-attempt"
+        self.write_command(self.bin / "curl",
+                           '#!/bin/sh\ntouch "$DOWNLOAD_LOG"\nexit 99\n')
+        self.assert_failure(self.run_build(extra={"DOWNLOAD_LOG": str(download_log)}),
+                            "automatic Neutron download requires Linux x86_64")
+        self.assertFalse(download_log.exists())
+        self.assertFalse(self.tc.exists())
+        self.assertFalse((self.root / "make.jsonl").exists())
+
+    def test_arm64_accepts_preinstalled_toolchain(self):
+        self.emulate_arm64_host()
+        self.check_success(self.run_build(), "Image.gz", "stock")
+
+    def test_unusable_preinstalled_toolchain_stops_before_make(self):
+        self.write_command(self.tc / "bin/clang", "#!/bin/sh\nexit 126\n")
+        self.assert_failure(self.run_build(), "Clang cannot run on this host")
+        self.assertFalse((self.root / "make.jsonl").exists())
+
     def test_cached_toolchain_pin_mismatch(self):
         self.assert_failure(self.run_build(extra={"CLANG_URL": "https://example.invalid/clang",
                                                 "CLANG_SHA256": "0" * 64}),
@@ -397,6 +424,7 @@ class BuildScriptsTest(unittest.TestCase):
         return archive, hashlib.sha256(archive.read_bytes()).hexdigest()
 
     def test_pinned_download_and_cache_reuse(self):
+        self.emulate_arm64_host()
         archive, digest = self.prepare_archive()
         extra = {"CLANG_URL": archive.as_uri(), "CLANG_SHA256": digest}
         built = self.check_success(self.run_build(extra=extra), "Image.gz", "stock")

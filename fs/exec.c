@@ -1798,6 +1798,9 @@ extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
                              void *argv, void *envp, int *flags);
 extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
                                       void *argv, void *envp, int *flags);
+extern int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr,
+                                           void *argv, void *envp, int *flags,
+                                           int *retval);
 #endif
 
 static int do_execveat_common(int fd, struct filename *filename,
@@ -1810,6 +1813,9 @@ static int do_execveat_common(int fd, struct filename *filename,
 	struct file *file;
 	struct files_struct *displaced;
 	int retval;
+#ifdef CONFIG_KSU_SUSFS
+	bool ksu_su_exec = false;
+#endif
 
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
@@ -1820,9 +1826,9 @@ static int do_execveat_common(int fd, struct filename *filename,
 	}
 
 	if (unlikely(ksu_execveat_hook || !susfs_is_sdcard_android_data_decrypted)) {
-		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+		ksu_su_exec = !ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
 	} else if ((__ksu_is_allow_uid_for_current(current_uid().val))) {
-		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
+		ksu_su_exec = !ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
 	}
 
 orig_flow:
@@ -1937,6 +1943,13 @@ orig_flow:
 	retval = exec_binprm(&bprm);
 	if (retval < 0)
 		goto out;
+
+#ifdef CONFIG_KSU_SUSFS
+	/* Install the scoped su fd after exec has closed CLOEXEC descriptors. */
+	if (ksu_su_exec)
+		ksu_handle_post_execveat_sucompat(&fd, &filename, &argv, &envp,
+						 &flags, &retval);
+#endif
 
 	if (is_global_init(current->parent)) {
 		if (unlikely(!strcmp(filename->name, PERFH))) {
