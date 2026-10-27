@@ -42,6 +42,8 @@ and preserve the 4.19 user-path and SUSFS interfaces. Package-list and root-gran
 revocation fixes are now upstream. The scripts require built-in KSU and SUSFS,
 and reject accidental enabling of KPM/debug/manual-su. Removed LSM/manual-hook
 config symbols are no longer requested or checked.
+The optional new CPU-spoof extension and preinit runner are unavailable in
+this legacy integration; their required interfaces do not match this tree.
 See [integration notes](Documentation/notkernel/sukisu-susfs.md) for sources,
 local changes and validation scope.
 

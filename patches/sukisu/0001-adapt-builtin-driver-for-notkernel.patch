@@ -17,11 +17,20 @@ allowlist gates. This preserves the existing SUSFS 2.1 behavior; it does not
 claim to backport the later SUSFS features. Throne-tracker bounds and root
 revocation fixes from the old patch are already in this upstream revision.
 
+Disable the optional CPU spoof extension on this legacy tree: its new code
+assumes an enum clocksource mode and enum-sized vdso_default, while this
+backport uses bool vdso_direct / vdso_default and the opposite datapage mode.
+It also assumes two native HWCAP words and a different CPU workaround bit
+mapping. Do not register the handler or perform partial kernel-memory writes;
+its direct IO entry returns -EOPNOTSUPP before touching the supplied pointer.
+Guard feature names and policy locals by the same versions as their actual
+SELinux implementations instead of suppressing compiler diagnostics.
+
 diff --git a/kernel/Makefile b/kernel/Makefile
-index bed47b8..b1b308c 100644
+index bed47b8..307733e 100644
 --- a/kernel/Makefile
 +++ b/kernel/Makefile
-@@ -18,70 +18,15 @@ else
+@@ -18,70 +18,19 @@ else
  ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
  endif
  
@@ -81,8 +90,11 @@ index bed47b8..b1b308c 100644
 -git_branch       = $(shell cd $(KSU_SRC) && $(GIT_BIN) rev-parse --abbrev-ref HEAD 2>/dev/null)
 -git_commit_count = $(shell cd $(KSU_SRC) && $(GIT_BIN) rev-list --count $(REPO_BRANCH) 2>/dev/null)
 -git_latest_tag   = $(shell cd $(KSU_SRC) && $(GIT_BIN) describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
--
+ 
 -$(shell cd $(KSU_SRC) 2>/dev/null && [ -f ../.git/shallow ] && $(GIT_BIN) fetch --unshallow 2>/dev/null)
++# CPU spoof assumes modern clocksource/HWCAP layouts and workaround IDs.
++# Do not expose it on this legacy tree; the core UAPI and root hooks remain.
++ccflags-y += -DKSU_NO_CPU_SPOOF
  
 -GITHUB_API_BASE  := https://api.github.com/repos/$(REPO_OWNER)/$(REPO_NAME)
 -KSU_GITHUB_VER   := $(shell $(CURL_BIN) -s "$(GITHUB_API_BASE)/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
@@ -99,6 +111,64 @@ index bed47b8..b1b308c 100644
  $(info -- $(REPO_NAME) version: $(KSU_VERSION) [$(KSU_VERSION_FULL)])
  
  ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+diff --git a/kernel/extension/cpu_spoof.c b/kernel/extension/cpu_spoof.c
+index 0007c2f..7118c6d 100644
+--- a/kernel/extension/cpu_spoof.c
++++ b/kernel/extension/cpu_spoof.c
+@@ -10,6 +10,17 @@
+  * is rejected with a dmesg warning and clears the forced-pending bit.
+  * The default force semantics are not obvious (per-device MIDR).
+  */
++#include <linux/errno.h>
++
++#ifdef KSU_NO_CPU_SPOOF
++/* This tree has bool vdso_direct/vdso_default, scalar elf_hwcap and different
++ * workaround IDs. Reject before any user copy, symbol lookup or kernel write.
++ */
++int ksu_extension_cpu_spoof_io(u32 id, void __user *raw)
++{
++    return -EOPNOTSUPP;
++}
++#else
+ #include <linux/kernel.h>
+ #include <linux/types.h>
+ #include <linux/cpumask.h>
+@@ -236,3 +247,5 @@ int ksu_extension_cpu_spoof_io(u32 id, void __user *raw)
+ 
+     return set_spoof_cpu(&cmd);
+ }
++
++#endif /* KSU_NO_CPU_SPOOF */
+diff --git a/kernel/extension/extension.c b/kernel/extension/extension.c
+index b64aa5e..5d368c9 100644
+--- a/kernel/extension/extension.c
++++ b/kernel/extension/extension.c
+@@ -416,12 +416,14 @@ void __init ksu_extension_register_all(void)
+         .io_handler = ksu_extension_kpm_io,
+         .apply_forced = ksu_extension_kpm_apply_forced,
+     };
++#ifndef KSU_NO_CPU_SPOOF
+     static const struct ksu_extension_handler cpu_spoof_handler = {
+         .extension_id = KSU_EXTENSION_CPU_SPOOF,
+         .name = "cpu_spoof",
+         .ops = NULL,
+         .io_handler = ksu_extension_cpu_spoof_io,
+     };
++#endif
+     static const struct ksu_extension_handler umount_paths_handler = {
+         .extension_id = KSU_EXTENSION_UMOUNT_PATHS,
+         .name = "umount_paths",
+@@ -451,8 +453,10 @@ void __init ksu_extension_register_all(void)
+ 
+     if (ksu_register_extension_handler(&kpm_handler))
+         pr_err("extension: failed to register kpm\n");
++#ifndef KSU_NO_CPU_SPOOF
+     if (ksu_register_extension_handler(&cpu_spoof_handler))
+         pr_err("extension: failed to register cpu_spoof\n");
++#endif
+     if (ksu_register_extension_handler(&umount_paths_handler))
+         pr_err("extension: failed to register umount_paths\n");
+     if (ksu_register_extension_handler(&dynamic_manager_handler))
 diff --git a/kernel/feature/adb_root.c b/kernel/feature/adb_root.c
 index d2f867c..c383233 100644
 --- a/kernel/feature/adb_root.c
@@ -344,6 +414,20 @@ index e956748..7673e9c 100644
  }
  
  int escape_with_root_profile(void)
+diff --git a/kernel/policy/feature.c b/kernel/policy/feature.c
+index 05ae163..d499510 100644
+--- a/kernel/policy/feature.c
++++ b/kernel/policy/feature.c
+@@ -7,7 +7,9 @@ static const char *const feature_names[KSU_FEATURE_MAX] = {
+     [KSU_FEATURE_KERNEL_UMOUNT] = "kernel_umount",
+     [KSU_FEATURE_SULOG] = "sulog",
+     [KSU_FEATURE_ADB_ROOT] = "adb_root",
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     [KSU_FEATURE_SELINUX_HIDE] = "selinux_hide",
++#endif
+     [KSU_FEATURE_SHELL_SU_ADB_ONLY] = "shell_su_adb_only",
+     [KSU_FEATURE_MOUNT_HIDE] = "mount_hide",
+ };
 diff --git a/kernel/runtime/ksud.c b/kernel/runtime/ksud.c
 index ad6c657..930aa46 100644
 --- a/kernel/runtime/ksud.c
@@ -378,6 +462,20 @@ index ad6c657..930aa46 100644
              apply_kernelsu_rules();
              cache_sid();
              setup_ksu_cred();
+diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
+index 3d5b86e..d3f95a7 100644
+--- a/kernel/selinux/rules.c
++++ b/kernel/selinux/rules.c
+@@ -151,7 +151,9 @@ static int apply_kernelsu_rules_fn(void *ptr)
+ 
+ void apply_kernelsu_rules(void)
+ {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     struct selinux_policy *pol, *old_pol;
++#endif
+     struct policydb *db;
+ 
+     if (!getenforce()) {
 diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
 index 22bf2d2..b647dbf 100644
 --- a/kernel/supercall/dispatch.c

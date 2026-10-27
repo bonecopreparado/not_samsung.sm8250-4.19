@@ -109,6 +109,55 @@ int main(void) {
         harness = (ROOT / "tests/sukisu_userpath_harness.c").read_text()
         compile_and_run(self.root, harness.replace("/* FUNCTIONS_UNDER_TEST */", functions))
 
+    @unittest.skipUnless(shutil.which("gcc"), "GCC is needed for the host harness")
+    def test_legacy_cpu_spoof_is_unavailable_before_user_copy(self):
+        self.prepare()
+        source = self.root / "KernelSU/kernel/extension/cpu_spoof.c"
+        code = r'''
+#include <assert.h>
+#include <stddef.h>
+#define KSU_NO_CPU_SPOOF
+#define __user
+typedef unsigned int u32;
+''' + '#include "' + str(source) + '"\n' + r'''
+int main(void) {
+    assert(ksu_extension_cpu_spoof_io(0, NULL) == -EOPNOTSUPP);
+    assert(ksu_extension_cpu_spoof_io(0, (void *)1) == -EOPNOTSUPP);
+    assert(ksu_extension_cpu_spoof_io(0, (void *)-1) == -EOPNOTSUPP);
+    return 0;
+}
+'''
+        compile_and_run(self.root, code)
+
+    @unittest.skipUnless(shutil.which("gcc"), "GCC is needed for the host harness")
+    def test_feature_names_match_kernel_specific_uapi(self):
+        self.prepare()
+        source = (self.root / "KernelSU/kernel/policy/feature.c").read_text()
+        table = source[source.index("static const char *const feature_names["):]
+        table = table[:table.index("\n};") + len("\n};")]
+        for version in ((4, 19, 0), (5, 10, 0)):
+            with self.subTest(version=version):
+                code = r'''
+#include <assert.h>
+#include <stddef.h>
+#include <string.h>
+#define KERNEL_VERSION(a, b, c) (((a) << 16) | ((b) << 8) | (c))
+''' + '#define LINUX_VERSION_CODE KERNEL_VERSION(%d, %d, %d)\n' % version + r'''
+#include "uapi/feature.h"
+''' + table + r'''
+int main(void) {
+    assert(!strcmp(feature_names[KSU_FEATURE_SU_COMPAT], "su_compat"));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+    assert(!strcmp(feature_names[KSU_FEATURE_SELINUX_HIDE], "selinux_hide"));
+#else
+    assert(feature_names[4] == NULL);
+#endif
+    return 0;
+}
+'''
+                compile_and_run(self.root, code,
+                                [self.root / "KernelSU/kernel/include"])
+
 
 class SusfsMacroTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("gcc"), "GCC is needed for the host harness")

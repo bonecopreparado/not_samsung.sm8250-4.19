@@ -59,6 +59,11 @@ variant does not request SELinux permissive mode.
 - Explicitly disabled built-in preinit runner: this tree has no matching init
   hook, so the driver must not advertise preinit support based on installed
   headers alone.
+- Explicitly unavailable optional CPU-spoof extension. Its newer clocksource,
+  vDSO, HWCAP-array and CPU-erratum assumptions do not match this 4.19 tree.
+  It is not registered or reported as supported, and its IO entry returns
+  `-EOPNOTSUPP` before any writes. Core root/Manager communication does not
+  depend on this extension.
 
 The package-list bounds/allocation and root-grant revocation fixes are present
 in the new upstream pin and no longer need backport hunks.
