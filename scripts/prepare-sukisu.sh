@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-expected=624727d1077f5afea894f066bcb8ca70079cf802
+expected=fbc67d004b3b68723e91dd86d50dead1120b4a9a
 if [[ $(git -C KernelSU rev-parse HEAD) != "$expected" ]]; then
     printf 'Error: SukiSU must be at %s before applying patches.\n' "$expected" >&2
     exit 1

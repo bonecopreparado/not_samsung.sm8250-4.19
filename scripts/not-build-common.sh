@@ -22,6 +22,12 @@ prepare_toolchain() {
     }
 
     if [[ ! -e "$TC_DIR" ]]; then
+        # Neutron's default archive runs on Linux x86_64. ARM64 Termux/Ubuntu
+        # must use a native installation or an explicitly pinned native archive.
+        if [[ -z "$requested_url" ]]; then
+            [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] ||
+                die 'The automatic Neutron download requires Linux x86_64. On ARM64 Ubuntu use TC_DIR=/usr after installing clang llvm lld; see Documentation/notkernel/termux.md. Or set CLANG_URL and CLANG_SHA256 for a host-compatible archive.'
+        fi
         require_commands curl tar zstd jq
         url=$requested_url
         if [[ -z "$url" ]]; then
@@ -43,7 +49,8 @@ prepare_toolchain() {
         for tool in clang ld.lld llvm-as llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do
             [[ -x "$download_dir/payload/bin/$tool" ]] || die "Clang archive is missing $tool."
         done
-        "$download_dir/payload/bin/clang" --version >/dev/null
+        "$download_dir/payload/bin/clang" --version >/dev/null ||
+            die 'Downloaded Clang cannot run on this host. Select a host-compatible toolchain.'
         printf 'clang_url=%s\nclang_archive_sha256=%s\n' "$url" "$archive_sha" \
             > "$download_dir/payload/.not-toolchain.txt"
         mkdir -p "$(dirname -- "$TC_DIR")"
@@ -59,7 +66,8 @@ prepare_toolchain() {
         [[ -x "$TC_DIR/bin/$tool" ]] ||
             die "Incomplete toolchain: $TC_DIR/bin/$tool. Move it aside or set TC_DIR."
     done
-    "$TC_DIR/bin/clang" --version >/dev/null
+    "$TC_DIR/bin/clang" --version >/dev/null ||
+        die 'Clang cannot run on this host. On ARM64 Ubuntu use TC_DIR=/usr after installing clang llvm lld; see Documentation/notkernel/termux.md.'
     export PATH="$TC_DIR/bin:$PATH"
 }
 
@@ -161,7 +169,7 @@ build_kernel() {
         grep -Fxq '# CONFIG_KSU is not set' "$out/.config" ||
             die 'The final stock configuration did not disable KernelSU.'
     else
-        for option in KSU KSU_LSM_HOOKS KSU_MANUAL_HOOK KSU_SUSFS; do
+        for option in KSU KSU_SUSFS; do
             grep -Fxq "CONFIG_$option=y" "$out/.config" ||
                 die "The final $variant configuration is missing CONFIG_$option=y."
         done

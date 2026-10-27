@@ -1,0 +1,72 @@
+name: Validate r8q SukiSU
+
+on:
+  pull_request:
+    branches:
+      - codex/r8q-sukisu-susfs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-sukisu-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-r8q:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      DEVICE: r8q
+      BUILD_VARIANT: ksu
+      UFS_AXI_MHZ: '300'
+      JOBS: '2'
+
+    steps:
+      - name: Check out source and pinned dependencies
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi python3 cpio rsync \
+            git ca-certificates curl jq zstd zip unzip xz-utils
+
+      - name: Run host regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s KernelSU/kernel/ksu_main.c
+          test -s NoMount/kernel/src/nomount.h
+          python3 -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee host-tests.log
+
+      - name: Build enforcing r8q kernel with SukiSU and SUSFS
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh 2>&1 | tee build-r8q.log
+
+      - name: Upload build artifacts and diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8q-sukisu-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          include-hidden-files: true
+          path: |
+            host-tests.log
+            build-r8q.log
+            not-*.zip
+            not-*.zip.config
+            not-*.zip.build-info.txt
+            not-*.zip.sha256
+            out/.config
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/dtb
+            out/arch/arm64/boot/dtbo.img

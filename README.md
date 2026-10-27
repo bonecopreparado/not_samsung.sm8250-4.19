@@ -6,6 +6,10 @@ The build-script maintenance in this fork builds on the original work of
 s-k-y.e and the other upstream contributors. It does not establish that a
 particular ROM/device combination is tested.
 
+For an ARM64 phone, follow the [Termux setup guide in Portuguese](Documentation/notkernel/termux.md)
+to install Ubuntu and a native compiler from scratch. The automatic Neutron
+download is for Linux x86_64 hosts; the phone instructions use `TC_DIR=/usr`.
+
 On Ubuntu, install the host dependencies before building:
 
 ```sh
@@ -24,22 +28,24 @@ producing a build without root. Dependency downloads never ask for credentials.
 
 ### SukiSU and SUSFS integration
 
-Rooted variants now use [SukiSU-Ultra's builtin driver](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/624727d1077f5afea894f066bcb8ca70079cf802),
-pinned at `624727d1077f5afea894f066bcb8ca70079cf802`, replacing Backslash KernelSU.
+Rooted variants use [SukiSU-Ultra's builtin driver](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/fbc67d004b3b68723e91dd86d50dead1120b4a9a),
+pinned at `fbc67d004b3b68723e91dd86d50dead1120b4a9a` (latest `builtin` checked on
+2026-10-27), with UAPI 6 for the v4.2.1-r2 Manager.
 The kernel contains the [SUSFS 2.1.0 port for 4.19](https://github.com/TheNoxS1d/susfs-kernel-4.19/commit/5e4f1930c9022b79559f3d337ef59e75a5562037),
-adapted to this tree's VFS backports. These are deliberately matched revisions;
-they are not the latest SukiSU or SUSFS releases. KPM, manual-su and debug mode
+adapted to this tree's VFS backports. SUSFS stays at 2.1.0; the compatibility
+patch adapts the newer driver to that interface. KPM, manual-su and debug mode
 are disabled. Normal `ksu` builds retain SELinux enforcing.
 
 The build applies `patches/sukisu/*.patch` to the exact SukiSU pin. These patches
 make version generation offline, handle this tree's disabled seccomp configuration,
-fix a package-list bounds read, and backport the root-grant revocation check.
-The scripts require the final config to contain built-in KSU, LSM/manual hooks
-and SUSFS, and reject accidental enabling of KPM/debug/manual-su.
+and preserve the 4.19 user-path and SUSFS interfaces. Package-list and root-grant
+revocation fixes are now upstream. The scripts require built-in KSU and SUSFS,
+and reject accidental enabling of KPM/debug/manual-su. Removed LSM/manual-hook
+config symbols are no longer requested or checked.
 See [integration notes](Documentation/notkernel/sukisu-susfs.md) for sources,
 local changes and validation scope.
 
-Use the [official v4.1.2 Manager APK](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/download/v4.1.2/SukiSU_v4.1.2_40545-release.apk)
+Use the [official v4.2.1-r2 Manager APK](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/download/v4.2.1-r2/SukiSU_v4.2.1-r2_41068-release.apk)
 for the initial test. The build does not install or update apps or modules on
 the phone. Recheck root grants after replacing the Backslash Manager. Start
 with modules disabled, then test modules one at a time. SUSFS support alone
@@ -59,6 +65,19 @@ GIT_TERMINAL_PROMPT=0 git submodule update --init --recursive -- Baseband-guard 
 bash scripts/prepare-nomount.sh
 bash scripts/prepare-sukisu.sh
 ```
+
+If reusing a checkout prepared with the old `624727d1` pin, reverse its old
+compatibility patch **before pulling this update**, while that old patch is
+still checked out:
+
+```sh
+git -C KernelSU apply --reverse --check "$PWD/patches/sukisu/0001-adapt-builtin-driver-for-notkernel.patch"
+git -C KernelSU apply --reverse "$PWD/patches/sukisu/0001-adapt-builtin-driver-for-notkernel.patch"
+```
+
+Only run the second command if the check succeeds. Preserve any additional
+local edits and resolve conflicts before updating the submodule; a fresh clone
+can also be used with the Termux instructions.
 
 Do not use `git submodule update --remote` to reproduce this version. Retain the
 tracked symlinks `drivers/kernelsu`, `security/baseband-guard` and `fs/nomount`.
@@ -166,6 +185,11 @@ rebuild boot outputs while keeping other compiled objects, preserve existing
 ZIPs and any local AnyKernel3 checkout, and reject simultaneous builds in the
 same checkout. Existing release workflows remain manual and retain their
 own publication behavior.
+
+The separate `Validate r8q SukiSU` workflow runs host tests and an enforcing
+300 MHz build for pull requests targeting `codex/r8q-sukisu-susfs`, or manually.
+It uploads build artifacts and logs without publishing a release. A successful
+host test run alone does not establish that the kernel builds or boots.
 
 ### Toolchain and packaging inputs
 

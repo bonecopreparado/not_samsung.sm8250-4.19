@@ -9,7 +9,7 @@ boot, root-manager compatibility, module compatibility or stability.
 | Component | Source revision | Use |
 | --- | --- | --- |
 | Kernel baseline | `e0a6f4ada8e929728925e3d40c7d2bcde3762af7` in this repository | Existing build scripts and Backslash build reference |
-| SukiSU-Ultra | [`624727d1077f5afea894f066bcb8ca70079cf802`](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/624727d1077f5afea894f066bcb8ca70079cf802) on `builtin` | Built-in non-GKI root driver, 4.1.2-era interface |
+| SukiSU-Ultra | [`fbc67d004b3b68723e91dd86d50dead1120b4a9a`](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/fbc67d004b3b68723e91dd86d50dead1120b4a9a) on `builtin` | Latest builtin checked 2026-10-27, UAPI 6 |
 | SUSFS 2.1.0 port | [`5e4f1930c9022b79559f3d337ef59e75a5562037`](https://github.com/TheNoxS1d/susfs-kernel-4.19/commit/5e4f1930c9022b79559f3d337ef59e75a5562037) | `kernel_patches/50_add_susfs_in_kernel-4.19.patch` and its three source/header files |
 | NoMount | [`d6cb7158b5a98a8168fa7bae191e23cbcfd38974`](https://github.com/maxsteeel/nomount/commit/d6cb7158b5a98a8168fa7bae191e23cbcfd38974) | Upstream development snapshot plus the local ART allocation patch |
 
@@ -21,10 +21,11 @@ NoMount credits and license notices are retained.
 
 These inputs are intentionally fixed. Newer SukiSU/SUSFS revisions change the
 hook interfaces and must not be substituted through `submodule update --remote`.
-The driver identifies itself as `v4.1.2-624727d1-notkernel` with compatibility
-version code 40545. This is a locally adapted builtin snapshot, not an upstream
-release binary. The initial companion APK is the official
-[SukiSU v4.1.2 Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/tag/v4.1.2).
+The driver identifies itself as `v4.2.1-fbc67d00-notkernel` with version code
+41095. This is a locally adapted builtin snapshot. The companion APK is the
+official [SukiSU v4.2.1-r2 Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/tag/v4.2.1-r2),
+which also uses UAPI 6. Matching the UAPI does not require matching the APK's
+numeric build code.
 
 ## Local adaptations
 
@@ -38,7 +39,9 @@ short-circuit conditions also work with null inodes/mappings.
 The root integration uses SukiSU's actual read, fstat, access, stat, exec,
 setresuid, reboot and devpts interfaces. Its native input handler supplies the
 safe-mode volume-key detection; no extra call to its empty legacy input hook is
-added. Rooted builds require KSU, LSM hooks, manual hooks and SUSFS in the
+added. The successful-exec hook installs the scoped su-session fd after
+`exec_binprm` succeeds. The init-rc fstat hook now uses the driver's static key.
+Rooted builds require KSU and SUSFS in the
 resolved config. KPM, manual-su and debug mode are disabled. The standard `ksu`
 variant does not request SELinux permissive mode.
 
@@ -47,16 +50,18 @@ variant does not request SELinux permissive mode.
 - Offline version metadata and removal of an unused generated-header dependency.
 - A seccomp configuration guard and local ADB path comparisons compatible with
   the selected SUSFS port.
-- The package-list bounds fix from SukiSU commit
-  [`c6d2bb9`](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/c6d2bb9a9f6e56b75b791c002482f15ac984b53e)
-  by Kamenta and allocation-context fix from
-  [`8c74411`](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/8c74411cb713be2e106b2f15f3c4bf5f02274efd)
-  by Wang Han.
-- A root-grant check after the init-specific exec handling, following the
-  revocation fix in ShirkNeko's
-  [`03079cc`](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/03079cccc9910624344d69d544bc2dcc7235f5fe).
-  This takes the authorization fix without changing the boolean-hook ABI to
-  the later SUSFS interface.
+- User-pointer stat/faccessat handlers compatible with this VFS, retaining
+  fault-safe path copies, the chroot guard and live root-policy checks.
+- Compatibility with SUSFS 2.1 task markers and omission of the newer optional
+  priority-UID command, which this port does not implement.
+- Removal of unused unavailable headers and version guards for SELinux hiding
+  hooks supported only on newer kernels.
+- Explicitly disabled built-in preinit runner: this tree has no matching init
+  hook, so the driver must not advertise preinit support based on installed
+  headers alone.
+
+The package-list bounds/allocation and root-grant revocation fixes are present
+in the new upstream pin and no longer need backport hunks.
 
 The preparation script verifies the SukiSU commit, applies the patch once and
 rejects conflicts. The expected modified submodule and patch checksum appear
@@ -65,23 +70,32 @@ rooted ZIP filenames now explicitly include `sukisu-susfs`.
 
 ## Verification
 
-The r8q `ksu` configuration with the default 300 MHz UFS profile was built
+The previous April SukiSU pin, before this update, was built with the r8q `ksu`
+configuration and default 300 MHz UFS profile
 through ThinLTO, modpost and the final kernel link, producing `Image.gz` and
 `dtbo.img`. This used Neutron Clang 24.0.0git, LLVM revision
 `f42c87ba2c70219b1f4ad1f031a5b6a1ea6603fb`, from catalogue release `06092026`.
 The linker emitted its existing conservative `--icf=safe` address-significance
 warning; the build exited successfully.
 
-Thirty host tests pass. They cover build/packaging failure handling, resolved
+The host regression suite covers build/packaging failure handling, resolved
 configuration checks, both patch preparers, actual NoMount ART code under
 allocation failures, SUSFS inode predicates and the actual SukiSU sucompat
-handler under a simulated grant/revoke policy. The C harnesses use address and
+handler under a simulated grant/revoke policy. New checks compile the UAPI
+header to confirm version 6 and GET_INFO `0x80104b02`, and exercise the successful
+exec requirement for su-session fd installation. The C harnesses use address and
 undefined-behavior sanitizers. Policy and kernel services in the sucompat
 harness are mocks; this is not an Android integration test.
 
-The changed VFS/proc, reboot, uname and SELinux objects also compiled separately
+At the previous pin, the changed VFS/proc, reboot, uname and SELinux objects also compiled separately
 with the stock configuration and KSU/SUSFS disabled. The optional UFS 333 MHz driver/DT profile
 has build-time verification only. Its details are in the root README.
+
+Those older build results do not validate this update. The isolated
+`validate-sukisu.yml` workflow builds this revision and uploads its logs and
+artifacts; check its result before device testing. Termux installation steps
+are in [termux.md](termux.md); the phone workflow itself still needs validation
+on a real device.
 
 ## First device test
 
@@ -90,6 +104,12 @@ working boot/kernel backup. With the matching Manager and modules initially
 disabled, check boot, root grant and revoke, SELinux mode, safe mode, reboot,
 suspend/resume, Wi-Fi, mobile data, camera and storage. Then enable the existing
 modules individually, including NoMount and any SUSFS companion tool.
+
+After boot, capture dmesg and logcat while opening the Manager. Check for
+`GET_INFO = 0x80104b02` and `install fd for manager: <manager uid>` in dmesg,
+and confirm logcat has no `UAPI version mismatch`. Exercise a fresh `su` grant
+and a revoked grant as well. If `unsupported command` or preview mode remains,
+keep the new logs together with the ZIP's build-info and config.
 
 SUSFS rules and NoMount rules are distinct and may affect the same paths.
 Investigate conflicts with each feature disabled separately. This integration
